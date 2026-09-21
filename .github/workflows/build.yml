@@ -1,0 +1,32 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install sourcepp pyzipper pyinstaller
+
+      - name: Build EXE
+        run: |
+          python -m PyInstaller --onefile --windowed --name GModAddonManager --hidden-import sourcepp --hidden-import pyzipper --hidden-import pyzipper.aeszip --collect-all sourcepp gmod_manager.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GModAddonManager-Windows
+          path: dist/GModAddonManager.exe
+          if-no-files-found: error
