@@ -1,5 +1,5 @@
 """
-ui.py — Tkinter interface. Includes custom c00lgui-styled dialogs.
+ui.py — Tkinter interface. c00lgui style. Custom dialogs.
 """
 
 from __future__ import annotations
@@ -65,6 +65,7 @@ def make_button(parent, text, command, style="normal"):
         parent, text=text, command=command,
         bg=C_BG, fg=C_FG,
         activebackground=C_RED, activeforeground=C_FG,
+        disabledforeground="#550000",
         relief="flat", bd=0, font=F_BTN,
         highlightbackground=C_RED, highlightcolor=C_RED,
         highlightthickness=1, padx=10, pady=6,
@@ -121,10 +122,6 @@ def center_on_parent(win, parent):
 # ============================================================
 
 def c00l_choice(parent, title, body, buttons, t):
-    """
-    buttons: list of (label_key, value) — rendered left to right.
-    Returns the selected value, or None if window closed.
-    """
     win = tk.Toplevel(parent)
     win.title(title)
     win.configure(bg=C_BG)
@@ -137,19 +134,19 @@ def c00l_choice(parent, title, body, buttons, t):
     result = {"value": None}
 
     head = tk.Frame(win, bg=C_RED)
-    head.pack(fill="x")
+    head.pack(side="top", fill="x")
     head_in = tk.Frame(head, bg=C_BG)
     head_in.pack(fill="x", padx=1, pady=1)
     tk.Label(head_in, text=title, bg=C_BG, fg=C_FG, font=F_HEAD,
              pady=10, padx=16).pack()
 
     body_frame = tk.Frame(win, bg=C_BG, padx=20, pady=20)
-    body_frame.pack(fill="both", expand=True)
+    body_frame.pack(side="top", fill="both", expand=True)
     tk.Label(body_frame, text=body, bg=C_BG, fg=C_FG, font=F_NORM,
              justify="left", anchor="w", wraplength=460).pack(fill="x")
 
     btn_row = tk.Frame(win, bg=C_BG, padx=20, pady=(0, 20))
-    btn_row.pack(fill="x")
+    btn_row.pack(side="bottom", fill="x")
 
     def choose(v):
         result["value"] = v
@@ -313,18 +310,16 @@ class GModAddonManager:
         file_menu = tk.Menu(menubar, tearoff=0, bg=C_BG, fg=C_FG,
                              activebackground=C_RED, activeforeground=C_FG)
         file_menu.add_command(label=self.t("menu_add_files"),
-                               command=self._browse,
-                               accelerator="Ctrl+O")
+                               command=self._browse, accelerator="Ctrl+O")
         file_menu.add_command(label=self.t("menu_add_folder"),
                                command=self._browse_folder,
                                accelerator="Ctrl+Shift+O")
         file_menu.add_separator()
-        file_menu.add_command(label=self.t("menu_export_btn") if "menu_export_btn" in STRINGS[DEFAULT_LANG] else self.t("export_btn"),
+        file_menu.add_command(label=self.t("export_btn"),
                                command=self._export_menu)
         file_menu.add_separator()
         file_menu.add_command(label=self.t("menu_exit"),
-                               command=self.on_close,
-                               accelerator="Ctrl+Q")
+                               command=self.on_close, accelerator="Ctrl+Q")
         menubar.add_cascade(label=self.t("menu_file"), menu=file_menu)
 
         edit_menu = tk.Menu(menubar, tearoff=0, bg=C_BG, fg=C_FG,
@@ -525,7 +520,8 @@ class GModAddonManager:
         self.btn_analyze = tk.Button(
             act, text=self.t("analyze_btn"), command=self._analyze,
             bg=C_RED, fg=C_FG, activebackground=C_RED_HOVER,
-            activeforeground=C_FG, relief="flat", bd=0, font=F_BTN,
+            activeforeground=C_FG, disabledforeground="#550000",
+            relief="flat", bd=0, font=F_BTN,
             padx=10, pady=12, highlightbackground=C_RED,
             highlightthickness=1, cursor="hand2")
         self.btn_analyze.pack(side="left", expand=True, fill="x", padx=(0, 2))
@@ -533,6 +529,7 @@ class GModAddonManager:
         self.btn_extract = tk.Button(
             act, text=self.t("extract_btn"), command=self._extract,
             bg=C_BG, fg=C_FG, activebackground=C_RED, activeforeground=C_FG,
+            disabledforeground="#550000",
             relief="flat", bd=0, font=F_BTN, padx=10, pady=12,
             highlightbackground=C_RED, highlightcolor=C_RED,
             highlightthickness=1, cursor="hand2")
@@ -543,11 +540,7 @@ class GModAddonManager:
         b = make_button(act2, self.t("summary_btn"), self._show_last_summary)
         b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_summary")
         b = make_button(act2, self.t("conflicts_btn"), self._detect_conflicts)
-        b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_conflicts")
-        self.btn_cancel = make_button(act2, self.t("cancel_btn"), self._cancel)
-        self.btn_cancel.config(state="disabled")
-        self.btn_cancel.pack(side="left", expand=True, fill="x", padx=(2, 0))
-        self._wire_help(self.btn_cancel, "help_cancel")
+        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_conflicts")
 
         # ---- TOOLS ----
         self.tools_panel = make_panel(self.body, self.t("tools_panel"))
@@ -571,14 +564,21 @@ class GModAddonManager:
         b = make_button(r3, self.t("fastdl_btn"), self._fastdl)
         b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_fastdl")
 
-        # ---- PROGRESS ----
+        # ---- PROGRESS (con Cancel al lado) ----
         prog_panel = tk.Frame(self.body, bg=C_RED, bd=0)
         prog_panel.pack(fill="x", pady=(0, 4))
         prog_inner = tk.Frame(prog_panel, bg=C_BG)
         prog_inner.pack(fill="x", padx=1, pady=1)
-        self.progress = tk.Canvas(prog_inner, bg=C_BG, height=14,
+        prog_row = tk.Frame(prog_inner, bg=C_BG)
+        prog_row.pack(fill="x", padx=6, pady=6)
+        self.progress = tk.Canvas(prog_row, bg=C_BG, height=14,
                                     highlightthickness=0)
-        self.progress.pack(fill="x", padx=4, pady=4)
+        self.progress.pack(side="left", fill="x", expand=True)
+        self.btn_cancel = make_button(prog_row, self.t("cancel_btn"), self._cancel)
+        self.btn_cancel.config(state="disabled")
+        self.btn_cancel.pack(side="right", padx=(8, 0))
+        self._wire_help(self.btn_cancel, "help_cancel")
+
         self._progress_max = 100
         self._progress_val = 0
         self.progress_label = tk.Label(self.body, text=self.t("help_hint"),
@@ -802,10 +802,6 @@ class GModAddonManager:
                 try:
                     if s.kind == "gma" and s.path:
                         size_bytes += s.path.stat().st_size
-                    elif s.kind in ("zip_gma", "zip_folder") and s.root_zip:
-                        # Approximated: count the whole zip once per source
-                        # to avoid inflating; use metadata if available
-                        pass
                 except Exception:
                     pass
             size_str = human_size(size_bytes) if size_bytes else "0 B"
@@ -1180,8 +1176,6 @@ class GModAddonManager:
         self.compact_mode.set(not self.compact_mode.get())
         try:
             panel = self.tools_panel
-            # tools_panel is the "body" Frame inside make_panel; its parent
-            # is the inner Frame; the outer Frame holds the red border.
             outer = panel.master.master
             if self.compact_mode.get():
                 outer.pack_forget()
@@ -1194,7 +1188,6 @@ class GModAddonManager:
 
     def _rebuild_list(self):
         self._filter_timer = None
-        # Preserve scroll position
         try:
             prev_yview = self.rows_canvas.yview()
         except Exception:
@@ -1233,7 +1226,6 @@ class GModAddonManager:
             self.rows_canvas.config(height=min(max(h, 80), 320))
         except Exception:
             pass
-        # Restore scroll
         try:
             self.rows_canvas.yview_moveto(prev_yview[0])
         except Exception:
@@ -1248,9 +1240,6 @@ class GModAddonManager:
 
     def _add_row(self, s):
         sid = id(s)
-
-        # Determine warning state from metadata
-        deps = (s.metadata or {}).get("deps") or []
         orph = (s.metadata or {}).get("orphan_refs") or set()
         has_warn = bool(orph) and len(orph) >= 5
 
@@ -1367,9 +1356,6 @@ class GModAddonManager:
                 pass
             self._click_timer = None
             self._pending_click_sid = None
-        # Custom two-choice dialog
-        body = f"{s.name}\n\n{self.t('action_body', name='').strip()}"
-        # Simpler: just show the name and ask
         result = c00l_choice(
             self.root,
             self.t("action_title"),
@@ -1591,7 +1577,10 @@ class GModAddonManager:
         except Exception:
             pass
         try:
-            self.btn_cancel.config(state=("normal" if busy else "disabled"))
+            if busy:
+                self.btn_cancel.config(state="normal", bg=C_RED, fg=C_FG)
+            else:
+                self.btn_cancel.config(state="disabled", bg=C_BG, fg="#550000")
         except Exception:
             pass
         if busy:
@@ -1876,8 +1865,9 @@ class GModAddonManager:
         if auto_conflicts:
             lines.append("=== " + self.t("auto_conflicts_title") + " ===")
             lines.append("")
-            for c in sorted(auto_conflicts, key=lambda x: (
-                    {"high": 0, "medium": 1, "low": 2}.get(x.get("severity"), 3))):
+            for c in sorted(auto_conflicts,
+                             key=lambda x: {"high": 0, "medium": 1, "low": 2}.get(
+                                 x.get("severity"), 3)):
                 sev = {"high": "!!!", "medium": "!", "low": " "}.get(
                     c.get("severity"), " ")
                 lines.append(f"  {sev} [{c['kind']}] {c['identifier']}")
@@ -1990,57 +1980,89 @@ class GModAddonManager:
         return text
 
     def _show_summary(self, results, cancelled):
-        text = self._format_summary(results, cancelled)
+        # Generate text with explicit error fallback so we never show empty
+        try:
+            text = self._format_summary(results, cancelled)
+        except Exception:
+            text = "ERROR building summary:\n\n" + traceback.format_exc()
+        if not text.strip():
+            text = "(empty summary — no content generated)"
+
         win = tk.Toplevel(self.root)
         win.title(self.t("summary_btn"))
-        win.geometry("720x680")
-        win.minsize(520, 420)
+        win.geometry("720x700")
+        win.minsize(560, 420)
         win.configure(bg=C_BG)
         try:
             win.transient(self.root)
         except Exception:
             pass
-        head = tk.Frame(win, bg=C_RED); head.pack(fill="x")
-        head_in = tk.Frame(head, bg=C_BG); head_in.pack(fill="x", padx=1, pady=1)
+
+        # ---------- HEAD (top) ----------
+        head = tk.Frame(win, bg=C_RED)
+        head.pack(side="top", fill="x")
+        head_in = tk.Frame(head, bg=C_BG)
+        head_in.pack(fill="x", padx=1, pady=1)
         tk.Label(head_in, text=self.t("summary_btn"), bg=C_BG, fg=C_FG,
                  font=F_HEAD, pady=8).pack()
         sub = "Partial results" if cancelled else f"{len(results)} addon(s)"
         tk.Label(head_in, text=sub, bg=C_BG, fg=C_FG_DIM,
                  font=F_SMALL).pack(pady=(0, 6))
 
-        # Search bar
-        search_row = tk.Frame(win, bg=C_BG, padx=8, pady=(8, 0))
-        search_row.pack(fill="x")
+        # ---------- FOOTER (bottom, packed before body) ----------
+        footer = tk.Frame(win, bg=C_BG, padx=8, pady=8)
+        footer.pack(side="bottom", fill="x")
+
+        # ---------- SEARCH BAR (bottom, above footer) ----------
+        search_row = tk.Frame(win, bg=C_BG, padx=8, pady=(4, 0))
+        search_row.pack(side="bottom", fill="x")
         tk.Label(search_row, text=self.t("search_label"), bg=C_BG, fg=C_FG,
                  font=F_SMALL).pack(side="left")
         search_var = tk.StringVar()
         search_entry = make_entry(search_row, textvariable=search_var)
         search_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
         search_label = tk.Label(search_row, text="", bg=C_BG, fg=C_FG_DIM,
-                                  font=F_SMALL)
+                                  font=F_SMALL, width=16, anchor="e")
         search_label.pack(side="right")
 
-        body = tk.Frame(win, bg=C_BG, padx=8, pady=8)
-        body.pack(fill="both", expand=True)
-        tf = tk.Frame(body, bg=C_BG); tf.pack(fill="both", expand=True)
-        txt = tk.Text(tf, wrap="word", font=F_LOG, bg=C_BG, fg=C_FG,
+        # ---------- BODY (fills remaining) ----------
+        body = tk.Frame(win, bg=C_BG)
+        body.pack(side="top", fill="both", expand=True, padx=8, pady=8)
+        tf = tk.Frame(body, bg=C_BG)
+        tf.pack(side="top", fill="both", expand=True)
+
+        txt = tk.Text(tf, wrap="word", font=F_LOG,
+                      bg=C_BG, fg=C_FG,
                       insertbackground=C_RED, relief="flat",
                       highlightbackground=C_RED, highlightthickness=1,
-                      padx=6, pady=6)
+                      padx=6, pady=6, height=20, width=80)
         txt.pack(side="left", fill="both", expand=True)
         sb = make_scrollbar(tf, "vertical", txt.yview)
         sb.pack(side="right", fill="y")
         txt.config(yscrollcommand=sb.set)
         txt.insert("1.0", text)
+        txt.config(state="disabled")
 
+        # ---------- SEARCH behavior ----------
         def highlight_matches(*_):
-            needle = search_var.get().strip().lower()
+            try:
+                txt.config(state="normal")
+            except Exception:
+                pass
             try:
                 txt.tag_remove("search", "1.0", "end")
             except Exception:
                 pass
+            needle = search_var.get().strip().lower()
             if not needle:
-                search_label.config(text="")
+                try:
+                    search_label.config(text="")
+                except Exception:
+                    pass
+                try:
+                    txt.config(state="disabled")
+                except Exception:
+                    pass
                 return
             count = 0
             start = "1.0"
@@ -2058,15 +2080,21 @@ class GModAddonManager:
                 txt.tag_config("search", background=C_RED, foreground=C_FG)
             except Exception:
                 pass
-            if count:
-                search_label.config(text=self.t("search_found", n=count))
-            else:
-                search_label.config(text=self.t("search_none"))
+            try:
+                if count:
+                    search_label.config(text=self.t("search_found", n=count))
+                else:
+                    search_label.config(text=self.t("search_none"))
+            except Exception:
+                pass
+            try:
+                txt.config(state="disabled")
+            except Exception:
+                pass
 
         search_var.trace_add("write", highlight_matches)
 
-        footer = tk.Frame(win, bg=C_BG, padx=8, pady=8)
-        footer.pack(fill="x")
+        # ---------- FOOTER buttons ----------
         def do_copy():
             try:
                 win.clipboard_clear()
@@ -2074,12 +2102,20 @@ class GModAddonManager:
                 win.update()
             except Exception:
                 pass
+
         make_button(footer, self.t("close_btn"), win.destroy).pack(
             side="right", expand=True, fill="x", padx=(3, 0))
         make_button(footer, self.t("copy_btn"), do_copy).pack(
             side="right", expand=True, fill="x", padx=(0, 3))
+
         center_on_parent(win, self.root)
         bring_to_front(win)
+        # Force a layout pass
+        try:
+            win.update_idletasks()
+            win.update()
+        except Exception:
+            pass
 
     def _show_last_summary(self):
         if not self.last_results:
@@ -2175,9 +2211,9 @@ class GModAddonManager:
         frame = tk.Frame(win, bg=C_BG, padx=10, pady=10)
         frame.pack(fill="both", expand=True)
         tk.Label(frame, text=f"{self.t('conflicts_btn')} ({total})",
-                 bg=C_BG, fg=C_FG, font=F_HEAD).pack(anchor="w")
+                 bg=C_BG, fg=C_FG, font=F_HEAD).pack(side="top", anchor="w")
         tf = tk.Frame(frame, bg=C_BG)
-        tf.pack(fill="both", expand=True, pady=(6, 0))
+        tf.pack(side="top", fill="both", expand=True, pady=(6, 0))
         txt = tk.Text(tf, wrap="word", font=F_LOG, bg=C_BG, fg=C_FG,
                       relief="flat", highlightbackground=C_RED,
                       highlightthickness=1)
@@ -2188,7 +2224,7 @@ class GModAddonManager:
         txt.insert("1.0", text)
         txt.config(state="disabled")
         make_button(frame, self.t("close_btn"), win.destroy).pack(
-            anchor="e", pady=(8, 0))
+            side="bottom", anchor="e", pady=(8, 0))
         center_on_parent(win, self.root)
         bring_to_front(win)
 
@@ -2325,7 +2361,6 @@ tr:hover {{ background:#1a0000; }}
                        f"Could not create:\n{e}", self.t)
             return
 
-        # Auto-analyze if never analyzed
         if not self._analyzed:
             if c00l_confirm(self.root, self.t("auto_analyze_title"),
                              self.t("auto_analyze_body"),
@@ -2333,7 +2368,6 @@ tr:hover {{ background:#1a0000; }}
                              self.t("cancel_btn"), self.t):
                 self._analyze()
             return
-        # If stale, warn
         if self._analysis_stale:
             if not c00l_confirm(
                     self.root, self.t("auto_analyze_title"),
@@ -2386,7 +2420,6 @@ tr:hover {{ background:#1a0000; }}
                                  self.t("cancel_btn"), self.t):
                 return
 
-        # Duplicate check inside batch
         targets = {}
         collisions = []
         for s in active:
@@ -2490,7 +2523,7 @@ tr:hover {{ background:#1a0000; }}
             c00l_alert(self.root, self.t("dest_missing_title"),
                        str(dest), self.t)
             return
-        # check free space
+        import shutil as _shutil
         try:
             total_size = 0
             for child in dest.iterdir():
@@ -2502,7 +2535,7 @@ tr:hover {{ background:#1a0000; }}
                             total_size += (Path(root) / f).stat().st_size
                         except Exception:
                             pass
-            usage = shutil.disk_usage(dest)
+            usage = _shutil.disk_usage(dest)
             if total_size > usage.free * 0.9:
                 if not c00l_confirm(
                         self.root, self.t("backup_title"),
@@ -2779,9 +2812,9 @@ tr:hover {{ background:#1a0000; }}
         frame = tk.Frame(win, bg=C_BG, padx=10, pady=10)
         frame.pack(fill="both", expand=True)
         tk.Label(frame, text=self.t("sizes_title"), bg=C_BG, fg=C_FG,
-                 font=F_HEAD).pack(anchor="w", pady=(0, 8))
+                 font=F_HEAD).pack(side="top", anchor="w", pady=(0, 8))
         canvas = tk.Canvas(frame, bg=C_BG, highlightthickness=0)
-        canvas.pack(fill="both", expand=True)
+        canvas.pack(side="top", fill="both", expand=True)
         win.update_idletasks()
         w = canvas.winfo_width() or 480
         row_h = 22
@@ -2844,7 +2877,6 @@ tr:hover {{ background:#1a0000; }}
                             src = base / d
                             if src.is_dir():
                                 dst = fastdl_root / d
-                                # avoid walking into fastdl_root if it is inside
                                 try:
                                     if str(dst.resolve()).startswith(str(src.resolve())):
                                         continue
