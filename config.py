@@ -22,7 +22,7 @@ F_ROW    = ("Arial", 10, "bold")
 F_ROW_S  = ("Arial", 9)
 
 APP_NAME = "GMod Addon Manager"
-APP_VERSION = "2.0.0"
+APP_VERSION = "1.1.0"
 
 CONFIG_FILE      = "gmod_manager.json"
 CACHE_FILE       = "gmod_cache.json"
