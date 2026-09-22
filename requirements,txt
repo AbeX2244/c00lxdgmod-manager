@@ -1,0 +1,31 @@
+# =====================================================
+# GMod Addon Manager v2.0.0 — Dependencies
+# =====================================================
+#
+# The application works with ONLY the Python standard library.
+# Every package below is optional and unlocks extra features.
+# Python 3.10+ required.
+
+# --- Optional: fast GMA extraction ---
+# C++ backend for reading .gma files. Falls back to the pure-Python
+# parser (PureGMA in core.py) if not installed.
+# Requires Python 3.11+ on Linux/macOS, 3.10+ on Windows.
+sourcepp>=0.2.0
+
+# --- Optional: AES-encrypted ZIP support ---
+# Enables reading ZIP archives with WinZip AES-128/256 encryption.
+# Without it, only legacy ZipCrypto or unencrypted ZIPs work.
+# Pulls pycryptodomex automatically.
+pyzipper>=0.3.6
+
+# --- Optional: 7z support (not yet wired into the UI) ---
+# py7zr>=0.20.0
+
+# --- Optional: RAR support (not yet wired into the UI) ---
+# Requires `unrar` binary on PATH — breaks the standalone goal.
+# rarfile>=4.0
+
+# =====================================================
+# Build-only (do NOT install for runtime)
+# =====================================================
+# pyinstaller>=6.0.0
