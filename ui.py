@@ -26,6 +26,7 @@ from config import (
     APP_NAME, APP_VERSION, CONFIG_FILE, LOG_FILE,
     DEFAULT_LANG, STRINGS,
     FILTER_DEBOUNCE_MS, PARALLEL_WORKERS, WATCH_POLL_SECONDS,
+    NESTED_WORKERS,
     MAX_SUMMARY_LINES,
 )
 from core import (
@@ -238,6 +239,14 @@ class GModAddonManager:
         self.log_q = queue.Queue()
         self.name_q = queue.Queue()
         self._name_worker_running = True
+
+        # Nested zip indexing: single FIFO + fixed worker pool
+        self._nested_q = queue.Queue()
+        self._nested_lock = threading.Lock()
+        self._nested_total = 0
+        self._nested_done = 0
+        self._nested_added = 0
+        self._nested_workers_started = False
 
         self._load_cfg()
         self._build()
@@ -499,8 +508,9 @@ class GModAddonManager:
         b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_clear")
         b = make_button(lb2, self.t("export_btn"), self._export_menu)
         b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_export")
-        b = make_button(lb2, self.t("compact_btn"), self._toggle_compact)
-        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_compact")
+        self.btn_compact = make_button(lb2, self.t("compact_btn"), self._toggle_compact)
+        self.btn_compact.pack(side="left", expand=True, fill="x", padx=(2, 0))
+        self._wire_help(self.btn_compact, "help_compact")
 
         # ---- DESTINATION ----
         self.dest_panel = make_panel(self.body, self.t("dest_panel"))
@@ -519,10 +529,10 @@ class GModAddonManager:
         act = tk.Frame(self.body, bg=C_BG); act.pack(fill="x", pady=(0, 4))
         self.btn_analyze = tk.Button(
             act, text=self.t("analyze_btn"), command=self._analyze,
-            bg=C_RED, fg=C_FG, activebackground=C_RED_HOVER,
-            activeforeground=C_FG, disabledforeground="#550000",
-            relief="flat", bd=0, font=F_BTN,
-            padx=10, pady=12, highlightbackground=C_RED,
+            bg=C_BG, fg=C_FG, activebackground=C_RED, activeforeground=C_FG,
+            disabledforeground="#550000",
+            relief="flat", bd=0, font=F_BTN, padx=10, pady=12,
+            highlightbackground=C_RED, highlightcolor=C_RED,
             highlightthickness=1, cursor="hand2")
         self.btn_analyze.pack(side="left", expand=True, fill="x", padx=(0, 2))
         self._wire_help(self.btn_analyze, "help_analyze")
@@ -552,8 +562,9 @@ class GModAddonManager:
         b = make_button(r1, self.t("rename_all_btn"), self._rename_all)
         b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_rename_all")
         r2 = tk.Frame(self.tools_panel, bg=C_BG); r2.pack(fill="x", pady=(4, 0))
-        b = make_button(r2, self.t("watch_btn"), self._toggle_watch)
-        b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_watch")
+        self.btn_watch = make_button(r2, self.t("watch_btn"), self._toggle_watch)
+        self.btn_watch.pack(side="left", expand=True, fill="x", padx=(0, 2))
+        self._wire_help(self.btn_watch, "help_watch")
         b = make_button(r2, self.t("collections_btn"), self._open_collections)
         b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_collections")
         b = make_button(r2, self.t("report_btn"), self._export_html)
@@ -564,7 +575,7 @@ class GModAddonManager:
         b = make_button(r3, self.t("fastdl_btn"), self._fastdl)
         b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_fastdl")
 
-        # ---- PROGRESS (con Cancel al lado) ----
+        # ---- PROGRESS ----
         prog_panel = tk.Frame(self.body, bg=C_RED, bd=0)
         prog_panel.pack(fill="x", pady=(0, 4))
         prog_inner = tk.Frame(prog_panel, bg=C_BG)
@@ -627,6 +638,7 @@ class GModAddonManager:
         if self.compact_mode.get():
             try:
                 self.tools_panel.master.master.pack_forget()
+                self.btn_compact.config(bg=C_RED, fg=C_FG)
             except Exception:
                 pass
 
@@ -704,6 +716,10 @@ class GModAddonManager:
                 except Exception:
                     pass
         except queue.Empty:
+            pass
+        try:
+            self._check_nested_completion()
+        except Exception:
             pass
         self.root.after(120, self._poll_log)
 
@@ -1106,51 +1122,115 @@ class GModAddonManager:
             self._log(f"[i] {zip_path.name}: {len(nested)} nested zip(s), "
                       f"indexing...")
             self._set_busy(True)
-            threading.Thread(target=self._run_index_nested,
-                              args=(zip_path, nested), daemon=True).start()
+            with self._nested_lock:
+                if self._nested_total == 0:
+                    self._op_start_time = time.time()
+                self._nested_total += len(nested)
+                total_now = self._nested_total
+            for name in nested:
+                self._nested_q.put((zip_path, name))
+            self._start_nested_workers()
+            self._set_progress(0, total_now,
+                               self.t("status_indexing",
+                                      i=0, total=total_now, name="..."))
         else:
             self._log(f"[OK] {zip_path.name}: {direct} addon(s)")
             self._set_status(self.t("status_added_zip",
                                      name=zip_path.name, n=direct))
 
-    def _run_index_nested(self, root_zip, nested_names):
-        total = len(nested_names)
-        added = 0
-        cancelled = False
-        self._op_start_time = time.time()
-        try:
-            self._log("")
-            self._log(f"=== INDEXING {root_zip.name} ({total}) ===")
-            for i, name in enumerate(nested_names, 1):
-                if self.cancel_flag.is_set():
-                    self._log("[!] Cancelled.")
-                    cancelled = True
-                    break
-                self._set_progress(i - 1, total,
-                                   self.t("status_indexing",
-                                           i=i, total=total, name=name))
+    # ---------------- Nested zip worker pool ----------------
+
+    def _start_nested_workers(self):
+        with self._nested_lock:
+            if self._nested_workers_started:
+                return
+            self._nested_workers_started = True
+        for i in range(NESTED_WORKERS):
+            t = threading.Thread(target=self._nested_worker,
+                                  args=(i,), daemon=True)
+            t.start()
+
+    def _nested_worker(self, worker_id):
+        while self._name_worker_running:
+            try:
+                task = self._nested_q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if task is None:
                 try:
-                    entries = ZipIndex.build(root_zip, [name], depth=1)
-                except Exception as e:
-                    self._log(f"[!] {name}: {e}")
-                    continue
+                    self._nested_q.task_done()
+                except Exception:
+                    pass
+                break
+            root_zip, zip_name = task
+
+            if self.cancel_flag.is_set():
+                with self._nested_lock:
+                    self._nested_done += 1
+                try:
+                    self._nested_q.task_done()
+                except Exception:
+                    pass
+                continue
+
+            try:
+                entries = ZipIndex.build(root_zip, [zip_name], depth=1)
                 for e in entries:
                     self.root.after(
                         0, lambda e=e, r=root_zip:
                         self._register_from_entry(r, e))
-                    added += 1
-                self._set_progress(i, total,
-                                   self.t("status_indexing",
-                                           i=i, total=total, name=name))
-            self._log(f"[OK] Nested index: {added} addon(s)")
-            if cancelled:
-                msg = self.t("status_index_cancelled", n=added)
-            else:
-                msg = self.t("status_index_ok", n=added)
-            self.root.after(0, lambda m=msg: self._reset_progress(m))
-        finally:
-            self.root.after(0, lambda: self._set_busy(False))
-            self.root.after(0, self._rebuild_list)
+                with self._nested_lock:
+                    self._nested_added += len(entries)
+            except Exception as e:
+                self._log(f"[!] {zip_name}: {e}")
+            finally:
+                with self._nested_lock:
+                    self._nested_done += 1
+                    done = self._nested_done
+                    total = self._nested_total
+                if done == total or (done % 5 == 0):
+                    try:
+                        self._set_progress(
+                            done, total,
+                            self.t("status_indexing",
+                                   i=done, total=total, name=zip_name))
+                    except Exception:
+                        pass
+                try:
+                    self._nested_q.task_done()
+                except Exception:
+                    pass
+
+    def _check_nested_completion(self):
+        try:
+            with self._nested_lock:
+                total = self._nested_total
+        except AttributeError:
+            return
+        if not total:
+            return
+        try:
+            pending = self._nested_q.unfinished_tasks
+        except Exception:
+            pending = 0
+        if pending > 0:
+            return
+        with self._nested_lock:
+            done = self._nested_done
+            total = self._nested_total
+            added = self._nested_added
+            if done < total:
+                return
+            had_work = (added > 0 or done > 0)
+            self._nested_done = 0
+            self._nested_total = 0
+            self._nested_added = 0
+        if had_work:
+            self._log(f"[OK] Nested index complete: {added} addon(s)")
+            msg = self.t("status_index_ok", n=added)
+            self._reset_progress(msg)
+            self._rebuild_list()
+        self._set_busy(False)
 
     def _register_from_entry(self, root_zip, e):
         if e.kind == "gma":
@@ -1179,8 +1259,10 @@ class GModAddonManager:
             outer = panel.master.master
             if self.compact_mode.get():
                 outer.pack_forget()
+                self.btn_compact.config(bg=C_RED, fg=C_FG)
             else:
                 outer.pack(fill="x", pady=(0, 8))
+                self.btn_compact.config(bg=C_BG, fg=C_FG)
         except Exception:
             pass
 
@@ -1327,6 +1409,7 @@ class GModAddonManager:
         menu.add_separator()
         menu.add_command(label=self.t("row_menu_remove"),
                           command=lambda: self._remove_single(s))
+        menu.bind("<FocusOut>", lambda e: menu.unpost())
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1586,7 +1669,8 @@ class GModAddonManager:
         if busy:
             self.cancel_flag.clear()
             self._set_status(self.t("working"))
-            self._op_start_time = time.time()
+            if self._op_start_time is None:
+                self._op_start_time = time.time()
         else:
             self._update_counts()
 
@@ -1980,7 +2064,6 @@ class GModAddonManager:
         return text
 
     def _show_summary(self, results, cancelled):
-        # Generate text with explicit error fallback so we never show empty
         try:
             text = self._format_summary(results, cancelled)
         except Exception:
@@ -1998,7 +2081,6 @@ class GModAddonManager:
         except Exception:
             pass
 
-        # ---------- HEAD (top) ----------
         head = tk.Frame(win, bg=C_RED)
         head.pack(side="top", fill="x")
         head_in = tk.Frame(head, bg=C_BG)
@@ -2009,11 +2091,9 @@ class GModAddonManager:
         tk.Label(head_in, text=sub, bg=C_BG, fg=C_FG_DIM,
                  font=F_SMALL).pack(pady=(0, 6))
 
-        # ---------- FOOTER (bottom, packed before body) ----------
         footer = tk.Frame(win, bg=C_BG, padx=8, pady=8)
         footer.pack(side="bottom", fill="x")
 
-        # ---------- SEARCH BAR (bottom, above footer) ----------
         search_row = tk.Frame(win, bg=C_BG, padx=8, pady=(4, 0))
         search_row.pack(side="bottom", fill="x")
         tk.Label(search_row, text=self.t("search_label"), bg=C_BG, fg=C_FG,
@@ -2025,7 +2105,6 @@ class GModAddonManager:
                                   font=F_SMALL, width=16, anchor="e")
         search_label.pack(side="right")
 
-        # ---------- BODY (fills remaining) ----------
         body = tk.Frame(win, bg=C_BG)
         body.pack(side="top", fill="both", expand=True, padx=8, pady=8)
         tf = tk.Frame(body, bg=C_BG)
@@ -2043,7 +2122,6 @@ class GModAddonManager:
         txt.insert("1.0", text)
         txt.config(state="disabled")
 
-        # ---------- SEARCH behavior ----------
         def highlight_matches(*_):
             try:
                 txt.config(state="normal")
@@ -2094,7 +2172,6 @@ class GModAddonManager:
 
         search_var.trace_add("write", highlight_matches)
 
-        # ---------- FOOTER buttons ----------
         def do_copy():
             try:
                 win.clipboard_clear()
@@ -2110,7 +2187,6 @@ class GModAddonManager:
 
         center_on_parent(win, self.root)
         bring_to_front(win)
-        # Force a layout pass
         try:
             win.update_idletasks()
             win.update()
@@ -2236,6 +2312,7 @@ class GModAddonManager:
         menu.add_command(label="CSV", command=lambda: self._export("csv"))
         menu.add_command(label="JSON", command=lambda: self._export("json"))
         menu.add_command(label="TXT", command=lambda: self._export("txt"))
+        menu.bind("<FocusOut>", lambda e: menu.unpost())
         try:
             menu.tk_popup(self.root.winfo_pointerx(),
                           self.root.winfo_pointery())
@@ -2683,6 +2760,10 @@ tr:hover {{ background:#1a0000; }}
             self._watch_stop.set()
             self._log(self.t("watch_stopped"))
             self._set_status(self.t("watch_stopped"))
+            try:
+                self.btn_watch.config(bg=C_BG, fg=C_FG)
+            except Exception:
+                pass
             return
         folder = filedialog.askdirectory(title=self.t("watch_prompt"),
                                           initialdir=self._last_dialog_dir)
@@ -2695,6 +2776,10 @@ tr:hover {{ background:#1a0000; }}
         self._watch_thread = threading.Thread(
             target=self._watch_loop, args=(Path(folder),), daemon=True)
         self._watch_thread.start()
+        try:
+            self.btn_watch.config(bg=C_RED, fg=C_FG)
+        except Exception:
+            pass
 
     def _watch_loop(self, folder):
         while not self._watch_stop.is_set():
@@ -2921,6 +3006,11 @@ tr:hover {{ background:#1a0000; }}
             self.name_q.put(None)
         except Exception:
             pass
+        for _ in range(NESTED_WORKERS):
+            try:
+                self._nested_q.put(None)
+            except Exception:
+                pass
         for t in (self._click_timer, self._filter_timer):
             if t is not None:
                 try:

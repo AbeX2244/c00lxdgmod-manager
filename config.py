@@ -23,7 +23,7 @@ F_ROW    = ("Arial", 10, "bold")
 F_ROW_S  = ("Arial", 9)
 
 APP_NAME = "GMod Addon Manager"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 CONFIG_FILE      = "gmod_manager.json"
 CACHE_FILE       = "gmod_cache.json"
@@ -124,7 +124,6 @@ KNOWN_LUA_GLOBALS = {
     "Wire", "PAC3", "pac",
 }
 
-# Framework globals that only ONE addon should ever load.
 EXCLUSIVE_GLOBALS = {
     "PILL": "Only one Pill Base framework can be loaded at a time.",
     "DrGBase": "Only one DrGBase version can be loaded at a time.",
@@ -141,6 +140,7 @@ MAX_NESTED_DEPTH = 3
 MAX_NESTED_IN_MEM = 300 * 1024 * 1024
 FILTER_DEBOUNCE_MS = 150
 PARALLEL_WORKERS = 4
+NESTED_WORKERS = 3
 WATCH_POLL_SECONDS = 3
 CACHE_MAX_ENTRIES = 2000
 MAX_SUMMARY_LINES = 4000
