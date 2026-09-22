@@ -1,6 +1,5 @@
 """
-config.py — Constants, i18n strings, patterns.
-No dependencies on other project modules.
+config.py — Constants, i18n strings, patterns, conflict groups.
 """
 
 C_BG        = "#000000"
@@ -10,6 +9,8 @@ C_RED       = "#ff0000"
 C_RED_DIM   = "#7a0000"
 C_RED_SEL   = "#3a0000"
 C_RED_HOVER = "#cc0000"
+C_WARN      = "#553300"
+C_WARN_BG   = "#2a1a00"
 
 F_TITLE  = ("Arial", 14, "bold")
 F_SUB    = ("Arial", 9)
@@ -22,14 +23,13 @@ F_ROW    = ("Arial", 10, "bold")
 F_ROW_S  = ("Arial", 9)
 
 APP_NAME = "GMod Addon Manager"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 CONFIG_FILE      = "gmod_manager.json"
 CACHE_FILE       = "gmod_cache.json"
 SESSION_FILE     = "gmod_session.json"
 LOG_FILE         = "gmod_manager.log"
 COLLECTIONS_FILE = "gmod_collections.json"
-WHITELIST_FILE   = "gmod_whitelist.json"
 
 TEXT_EXTENSIONS = {".txt", ".json", ".lua", ".md", ".cfg", ".ini", ".xml"}
 
@@ -54,6 +54,17 @@ KNOWN_DEPENDENCIES = {
     r"\bwac[_]?aircraft\b": "WAC",
     r"\bwos[_ ]?dynabase\b": "wOS DynaBase",
     r"\bdynabase\b": "wOS DynaBase",
+    r"\benhanced[_ ]?parakeet": "Enhanced Parakeets Pill Base",
+    r"\bparakeet": "Parakeet's Pill Base",
+    r"\bpill[_ ]?base\b": "Pill Base",
+    r"\baddpill\b": "Pill Base",
+    r"\boutcome[_ ]?memories\b": "Outcome Memories Pack",
+    r"\bulx\b": "ULX",
+    r"\bulib\b": "ULib",
+    r"\bdarkrp\b": "DarkRP",
+    r"\bm9k\b": "M9K",
+    r"\bcw[_]?2\.0\b": "CW 2.0",
+    r"\bsbx\b": "SBX",
 }
 
 LUA_DEP_HINTS = {
@@ -89,6 +100,41 @@ LUA_DANGER_PATTERNS = [
     (r'\bfile\.Write\s*\(',        'file.Write'),
 ]
 
+ASSET_REF_PATTERNS = [
+    r'util\.Precache(?:Model|Sound|Material|Texture|Sentence)\s*\(\s*["\']([^"\']+)["\']',
+    r'\bMaterial\s*\(\s*["\']([^"\']+)["\']',
+    r'["\']((?:models|materials|sound|particles|scenes|resource)/[^"\']{4,})["\']',
+    r'["\']([^"\']{6,}\.(?:mdl|vmt|vtf|vvd|phy|anm|wav|mp3|ogg))["\']',
+]
+
+LUA_GLOBAL_DEF_PATTERNS = [
+    r'^\s*(\w+)\s*=\s*\1\s+or\s*\{\}',
+    r'^\s*(\w+)\s*=\s*\{\s*\}\s*$',
+]
+
+LUA_HOOK_ID_PATTERN = r'hook\.Add\s*\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']+)["\']'
+LUA_NETSTR_PATTERN  = r'util\.AddNetworkString\s*\(\s*["\']([^"\']+)["\']'
+LUA_CONCMD_PATTERN  = r'concommand\.Add\s*\(\s*["\']([^"\']+)["\']'
+LUA_CVAR_PATTERN    = r'Create(?:Client)?ConVar\s*\(\s*["\']([^"\']+)["\']'
+LUA_EXTERNAL_USE_PATTERN = r'(?:^|[\s;(])([A-Z][A-Za-z0-9_]*)\.'
+
+KNOWN_LUA_GLOBALS = {
+    "PILL", "VJ", "DrGBase", "DrgBase", "drgbase",
+    "ArcCW", "ARC9", "TFA", "CFC", "simfphys",
+    "Wire", "PAC3", "pac",
+}
+
+# Framework globals that only ONE addon should ever load.
+EXCLUSIVE_GLOBALS = {
+    "PILL": "Only one Pill Base framework can be loaded at a time.",
+    "DrGBase": "Only one DrGBase version can be loaded at a time.",
+    "DrgBase": "Only one DrGBase version can be loaded at a time.",
+    "VJ": "Only one VJ Base version can be loaded at a time.",
+}
+
+FRAMEWORK_MIN_LUA_FILES = 5
+
+MIN_ASSET_REF_LEN = 10
 MAX_TEXT_SIZE = 2 * 1024 * 1024
 MAX_ZIP_TOTAL = 8 * 1024 * 1024 * 1024
 MAX_NESTED_DEPTH = 3
@@ -96,20 +142,61 @@ MAX_NESTED_IN_MEM = 300 * 1024 * 1024
 FILTER_DEBOUNCE_MS = 150
 PARALLEL_WORKERS = 4
 WATCH_POLL_SECONDS = 3
+CACHE_MAX_ENTRIES = 2000
+MAX_SUMMARY_LINES = 4000
+
+WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
 
 DEFAULT_LANG = "en"
 
 STRINGS = {
     "en": {
         "lang_button": "ES",
+        "menu_file": "File",
+        "menu_edit": "Edit",
+        "menu_tools": "Tools",
+        "menu_help": "Help",
+        "menu_add_files": "Add files...",
+        "menu_add_folder": "Add folder...",
+        "menu_exit": "Exit",
+        "menu_select_all": "Select all",
+        "menu_select_none": "Select none",
+        "menu_invert": "Invert selection",
+        "menu_remove": "Remove marked",
+        "menu_clear": "Clear list",
+        "menu_analyze": "Analyze",
+        "menu_extract": "Extract",
+        "menu_summary": "Show summary",
+        "menu_conflicts": "Detect conflicts",
+        "menu_about": "About",
+        "menu_shortcuts": "Keyboard shortcuts",
+        "about_body": "GMod Addon Manager v{version}\n\n"
+                      "Standalone GMA / ZIP / folder addon manager for Garry's Mod.\n"
+                      "No gmad.exe or Garry's Mod installation required.\n\n"
+                      "github.com/AbeX2244/c00lxdgmod-manager",
+        "shortcuts_body": "Ctrl+A  - Select all\n"
+                          "Ctrl+D  - Deselect all\n"
+                          "Ctrl+I  - Invert selection\n"
+                          "Delete  - Remove marked\n"
+                          "F5      - Analyze\n"
+                          "F6      - Extract\n"
+                          "F7      - Show summary\n"
+                          "F8      - Detect conflicts\n"
+                          "Ctrl+O  - Add files\n"
+                          "Ctrl+Shift+O  - Add folder\n"
+                          "Ctrl+L  - Focus log",
         "add_panel": "ADD",
         "files_btn": "FILES",
         "folder_btn": "FOLDER",
         "add_btn": "ADD",
-        "from_url_btn": "FROM URL",
+        "history_btn": "HISTORY",
         "filter_panel": "FILTER",
         "search_label": "Search:",
-        "group_dep": "Group by dependency",
+        "group_dep": "Group by dependency (requires analysis)",
         "addons_panel": "ADDONS",
         "all_btn": "ALL",
         "none_btn": "NONE",
@@ -117,6 +204,7 @@ STRINGS = {
         "remove_btn": "REMOVE",
         "clear_btn": "CLEAR",
         "export_btn": "EXPORT",
+        "compact_btn": "COMPACT",
         "dest_panel": "DESTINATION",
         "choose_btn": "CHOOSE",
         "open_btn": "OPEN",
@@ -128,12 +216,10 @@ STRINGS = {
         "conflicts_btn": "CONFLICTS",
         "cancel_btn": "CANCEL",
         "tools_panel": "TOOLS",
-        "history_btn": "HISTORY",
         "rename_all_btn": "RENAME ALL",
         "grep_btn": "GREP",
         "watch_btn": "WATCH",
         "collections_btn": "COLLECTIONS",
-        "whitelist_btn": "WHITELIST",
         "report_btn": "HTML REPORT",
         "sizes_btn": "SIZES",
         "fastdl_btn": "FASTDL",
@@ -141,6 +227,7 @@ STRINGS = {
         "copy_btn": "COPY",
         "log_clear_btn": "CLEAR",
         "log_open_btn": "OPEN FILE",
+        "log_autoscroll": "Auto-scroll",
         "close_btn": "CLOSE",
         "ready": "Ready.",
         "working": "Working...",
@@ -171,11 +258,6 @@ STRINGS = {
         "save_as_title": "Save as",
         "zip_error_title": "Error reading zip",
         "error_title": "Error",
-        "url_title": "Download from Workshop",
-        "url_prompt": "Paste the Steam Workshop URL:",
-        "url_bad_body": "Could not find a Workshop ID in that URL.",
-        "url_ok": "Downloaded: {name}",
-        "url_no_file": "Steam did not provide a download URL for this item.",
         "grep_title": "Grep inside addons",
         "grep_prompt": "Search string:",
         "grep_empty": "No matches found.",
@@ -190,8 +272,6 @@ STRINGS = {
         "watch_started": "Watching: {path}",
         "watch_stopped": "Watch stopped.",
         "watch_new": "New file detected: {name}",
-        "whitelist_title": "Workshop whitelist",
-        "whitelist_body": "IDs allowed (one per line):",
         "collections_title": "Collections",
         "collections_save": "Save current list",
         "collections_load": "Load collection",
@@ -205,6 +285,26 @@ STRINGS = {
         "fastdl_done": "Copied {n} asset(s) to {path}.",
         "gmod_open_title": "Garry's Mod appears to be running",
         "gmod_open_body": "GMod should be closed before modifying addons. Continue anyway?",
+        "missing_deps_title": "MISSING DEPENDENCIES",
+        "missing_deps_header": "This batch requires addons that are NOT in your list:",
+        "missing_deps_footer": "Without them, addons may load broken in-game (T-pose, missing animations, errors in console).",
+        "missing_deps_question": "Continue extracting anyway?",
+        "missing_deps_copy": "Copy names",
+        "missing_deps_workshop": "Open Workshop search",
+        "conflicts_title": "ADDON CONFLICTS",
+        "auto_conflicts_title": "AUTO-DETECTED CONFLICTS",
+        "frameworks_title": "FRAMEWORKS AND CONTENT",
+        "orphan_title": "POSSIBLE EXTERNAL DEPENDENCIES",
+        "orphan_body": "These addons reference assets not present in themselves.",
+        "orphan_hint": "They likely require an external addon. Check the Workshop page.",
+        "auto_analyze_title": "Not analyzed yet",
+        "auto_analyze_body": "The addons must be analyzed first to detect dependencies and conflicts.\n\nAnalyze now?",
+        "analysis_stale": "List changed since last analysis",
+        "auto_analyze_done": "Auto-analysis complete.",
+        "search_summary_prompt": "Find in summary:",
+        "search_found": "{n} match(es)",
+        "search_none": "No matches",
+        "eta_prefix": "ETA {eta}",
         "status_analyzing": "Analyzing {i}/{total}: {name}",
         "status_scanning": "Scanning {i}/{total}: {name}",
         "status_extracting": "Extracting {i}/{total}: {name}",
@@ -229,17 +329,84 @@ STRINGS = {
         "status_added_zip": "{name}: {n} addon(s)",
         "status_no_op": "No operation in progress.",
         "status_cancel_requested": "Cancel requested...",
+        "status_counts": "{total} addon(s) - {marked} marked - {size}",
+        "help_hint": "Hover any button to see what it does. Right-click a row for actions.",
+        "help_add_manual": "Add the path typed in the field above",
+        "help_browse": "Pick one or more .gma or .zip files",
+        "help_browse_folder": "Add a raw addon folder (with lua/, materials/, ...)",
+        "help_history": "Show the last 10 paths you used",
+        "help_all": "Mark all addons",
+        "help_none": "Unmark all addons",
+        "help_invert": "Swap marked/unmarked",
+        "help_remove": "Remove marked addons from the list (files stay on disk)",
+        "help_clear": "Clear the entire list",
+        "help_export": "Export the list as CSV, JSON, or TXT",
+        "help_compact": "Toggle compact mode (hide tools)",
+        "help_choose_dest": "Choose the destination folder",
+        "help_open_dest": "Open the destination folder",
+        "help_backup": "Backup existing addons before overwriting",
+        "help_analyze": "Scan addons: dependencies, files, suspicious code",
+        "help_extract": "Extract marked addons to the destination",
+        "help_summary": "Reopen the last analysis report",
+        "help_conflicts": "Find files that appear in 2+ addons",
+        "help_cancel": "Cancel the current operation",
+        "help_repack": "Pack a folder into a .gma file",
+        "help_grep": "Search text inside all addons",
+        "help_rename_all": "Bulk rename with a pattern",
+        "help_watch": "Auto-add new files dropped in a folder",
+        "help_collections": "Save/load addon list presets",
+        "help_report": "Export an HTML report of the list",
+        "help_sizes": "File type breakdown chart",
+        "help_fastdl": "Copy assets to a FastDL folder",
+        "row_menu_rename": "Rename",
+        "row_menu_remove": "Remove from list",
+        "row_menu_temp": "Extract to temp and open",
+        "row_menu_copy": "Copy path",
+        "row_menu_copy_name": "Copy name",
     },
     "es": {
         "lang_button": "EN",
-        "add_panel": "AÑADIR",
+        "menu_file": "Archivo",
+        "menu_edit": "Editar",
+        "menu_tools": "Herramientas",
+        "menu_help": "Ayuda",
+        "menu_add_files": "Anadir archivos...",
+        "menu_add_folder": "Anadir carpeta...",
+        "menu_exit": "Salir",
+        "menu_select_all": "Seleccionar todo",
+        "menu_select_none": "Deseleccionar todo",
+        "menu_invert": "Invertir seleccion",
+        "menu_remove": "Quitar marcados",
+        "menu_clear": "Limpiar lista",
+        "menu_analyze": "Analizar",
+        "menu_extract": "Extraer",
+        "menu_summary": "Mostrar resumen",
+        "menu_conflicts": "Detectar conflictos",
+        "menu_about": "Acerca de",
+        "menu_shortcuts": "Atajos de teclado",
+        "about_body": "GMod Addon Manager v{version}\n\n"
+                      "Gestor de addons GMA / ZIP / carpeta para Garry's Mod.\n"
+                      "No requiere gmad.exe ni Garry's Mod instalado.\n\n"
+                      "github.com/AbeX2244/c00lxdgmod-manager",
+        "shortcuts_body": "Ctrl+A  - Seleccionar todo\n"
+                          "Ctrl+D  - Deseleccionar todo\n"
+                          "Ctrl+I  - Invertir seleccion\n"
+                          "Delete  - Quitar marcados\n"
+                          "F5      - Analizar\n"
+                          "F6      - Extraer\n"
+                          "F7      - Mostrar resumen\n"
+                          "F8      - Detectar conflictos\n"
+                          "Ctrl+O  - Anadir archivos\n"
+                          "Ctrl+Shift+O  - Anadir carpeta\n"
+                          "Ctrl+L  - Foco al registro",
+        "add_panel": "ANADIR",
         "files_btn": "ARCHIVOS",
         "folder_btn": "CARPETA",
-        "add_btn": "AÑADIR",
-        "from_url_btn": "DESDE URL",
+        "add_btn": "ANADIR",
+        "history_btn": "HISTORIAL",
         "filter_panel": "FILTRO",
         "search_label": "Buscar:",
-        "group_dep": "Agrupar por dependencia",
+        "group_dep": "Agrupar por dependencia (requiere analisis)",
         "addons_panel": "ADDONS",
         "all_btn": "TODO",
         "none_btn": "NADA",
@@ -247,6 +414,7 @@ STRINGS = {
         "remove_btn": "QUITAR",
         "clear_btn": "LIMPIAR",
         "export_btn": "EXPORTAR",
+        "compact_btn": "COMPACTO",
         "dest_panel": "DESTINO",
         "choose_btn": "ELEGIR",
         "open_btn": "ABRIR",
@@ -258,19 +426,18 @@ STRINGS = {
         "conflicts_btn": "CONFLICTOS",
         "cancel_btn": "CANCELAR",
         "tools_panel": "HERRAMIENTAS",
-        "history_btn": "HISTORIAL",
         "rename_all_btn": "RENOMBRAR TODO",
         "grep_btn": "GREP",
         "watch_btn": "VIGILAR",
         "collections_btn": "COLECCIONES",
-        "whitelist_btn": "WHITELIST",
         "report_btn": "REPORTE HTML",
-        "sizes_btn": "TAMAÑOS",
+        "sizes_btn": "TAMANOS",
         "fastdl_btn": "FASTDL",
         "log_panel": "REGISTRO",
         "copy_btn": "COPIAR",
         "log_clear_btn": "LIMPIAR",
         "log_open_btn": "ABRIR",
+        "log_autoscroll": "Auto-scroll",
         "close_btn": "CERRAR",
         "ready": "Listo.",
         "working": "Trabajando...",
@@ -301,11 +468,6 @@ STRINGS = {
         "save_as_title": "Guardar como",
         "zip_error_title": "Error al leer zip",
         "error_title": "Error",
-        "url_title": "Descargar de Workshop",
-        "url_prompt": "Pega la URL de Steam Workshop:",
-        "url_bad_body": "No se encontro ID de Workshop en esa URL.",
-        "url_ok": "Descargado: {name}",
-        "url_no_file": "Steam no dio URL de descarga para este item.",
         "grep_title": "Buscar dentro de addons",
         "grep_prompt": "Texto a buscar:",
         "grep_empty": "Sin coincidencias.",
@@ -320,8 +482,6 @@ STRINGS = {
         "watch_started": "Vigilando: {path}",
         "watch_stopped": "Vigilancia detenida.",
         "watch_new": "Nuevo archivo: {name}",
-        "whitelist_title": "Whitelist de Workshop",
-        "whitelist_body": "IDs permitidos (uno por linea):",
         "collections_title": "Colecciones",
         "collections_save": "Guardar lista actual",
         "collections_load": "Cargar coleccion",
@@ -329,12 +489,32 @@ STRINGS = {
         "collections_saved": "Guardada: {name}",
         "collections_empty": "Sin colecciones guardadas.",
         "report_done": "Reporte guardado: {path}",
-        "sizes_title": "Desglose de tamaños",
+        "sizes_title": "Desglose de tamanos",
         "fastdl_title": "Export FastDL",
         "fastdl_prompt": "Elige la carpeta raiz de FastDL:",
         "fastdl_done": "{n} asset(s) copiados a {path}.",
         "gmod_open_title": "Garry's Mod parece estar abierto",
         "gmod_open_body": "GMod deberia estar cerrado antes de modificar addons. Continuar de todos modos?",
+        "missing_deps_title": "DEPENDENCIAS FALTANTES",
+        "missing_deps_header": "Este lote requiere addons que NO estan en tu lista:",
+        "missing_deps_footer": "Sin ellos, los addons pueden verse rotos en el juego (T-pose, animaciones faltantes, errores en consola).",
+        "missing_deps_question": "Extraer de todos modos?",
+        "missing_deps_copy": "Copiar nombres",
+        "missing_deps_workshop": "Abrir busqueda en Workshop",
+        "conflicts_title": "CONFLICTOS ENTRE ADDONS",
+        "auto_conflicts_title": "CONFLICTOS AUTO-DETECTADOS",
+        "frameworks_title": "FRAMEWORKS Y CONTENIDO",
+        "orphan_title": "POSIBLES DEPENDENCIAS EXTERNAS",
+        "orphan_body": "Estos addons referencian assets que no estan en si mismos.",
+        "orphan_hint": "Probablemente requieren un addon externo. Mira la pagina de Workshop.",
+        "auto_analyze_title": "Sin analizar todavia",
+        "auto_analyze_body": "Los addons deben analizarse primero para detectar dependencias y conflictos.\n\nAnalizar ahora?",
+        "analysis_stale": "La lista cambio desde el ultimo analisis",
+        "auto_analyze_done": "Auto-analisis completado.",
+        "search_summary_prompt": "Buscar en el resumen:",
+        "search_found": "{n} coincidencia(s)",
+        "search_none": "Sin coincidencias",
+        "eta_prefix": "Restante {eta}",
         "status_analyzing": "Analizando {i}/{total}: {name}",
         "status_scanning": "Escaneando {i}/{total}: {name}",
         "status_extracting": "Extrayendo {i}/{total}: {name}",
@@ -359,5 +539,39 @@ STRINGS = {
         "status_added_zip": "{name}: {n} addon(s)",
         "status_no_op": "No hay operacion en curso.",
         "status_cancel_requested": "Cancelacion solicitada...",
+        "status_counts": "{total} addon(s) - {marked} marcados - {size}",
+        "help_hint": "Pasa el cursor por un boton para ver que hace. Clic derecho en una fila para acciones.",
+        "help_add_manual": "Anade la ruta escrita en el campo",
+        "help_browse": "Elige uno o varios .gma o .zip",
+        "help_browse_folder": "Anade una carpeta cruda (con lua/, materials/, ...)",
+        "help_history": "Muestra las ultimas 10 rutas usadas",
+        "help_all": "Marca todos los addons",
+        "help_none": "Desmarca todos",
+        "help_invert": "Invierte marcados/desmarcados",
+        "help_remove": "Quita los marcados de la lista (archivos intactos)",
+        "help_clear": "Vacia toda la lista",
+        "help_export": "Exporta la lista como CSV, JSON o TXT",
+        "help_compact": "Alterna modo compacto (oculta herramientas)",
+        "help_choose_dest": "Elige la carpeta destino",
+        "help_open_dest": "Abre la carpeta destino",
+        "help_backup": "Respalda los addons existentes antes de sobrescribir",
+        "help_analyze": "Escanea addons: dependencias, archivos, codigo sospechoso",
+        "help_extract": "Extrae los addons marcados al destino",
+        "help_summary": "Reabre el ultimo reporte de analisis",
+        "help_conflicts": "Encuentra archivos que aparecen en 2+ addons",
+        "help_cancel": "Cancela la operacion en curso",
+        "help_repack": "Empaqueta una carpeta en un .gma",
+        "help_grep": "Busca texto dentro de todos los addons",
+        "help_rename_all": "Renombra en masa con un patron",
+        "help_watch": "Anade automaticamente archivos nuevos en una carpeta",
+        "help_collections": "Guarda/carga presets de listas",
+        "help_report": "Exporta un reporte HTML de la lista",
+        "help_sizes": "Grafico de desglose por tipo de archivo",
+        "help_fastdl": "Copia assets a una carpeta FastDL",
+        "row_menu_rename": "Renombrar",
+        "row_menu_remove": "Quitar de la lista",
+        "row_menu_temp": "Extraer a temporal y abrir",
+        "row_menu_copy": "Copiar ruta",
+        "row_menu_copy_name": "Copiar nombre",
     },
 }

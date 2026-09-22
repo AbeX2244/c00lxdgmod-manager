@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 import tkinter as tk
 
-from config import APP_NAME, APP_VERSION, MAX_TEXT_SIZE
+from config import APP_NAME, APP_VERSION
 from core import (
     configure_logging, safe_name, copy_tree,
     GMAExtractor, Analyzer, ZipIndex, Source,
