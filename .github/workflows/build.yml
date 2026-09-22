@@ -22,7 +22,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          python -m PyInstaller --onefile --windowed --name GModAddonManager --hidden-import sourcepp --hidden-import pyzipper --hidden-import pyzipper.aeszip --collect-all sourcepp gmod_manager.py
+          python -m PyInstaller --onefile --windowed --name GModAddonManager --hidden-import sourcepp --hidden-import pyzipper --hidden-import config --hidden-import core --hidden-import ui --collect-all sourcepp main.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
