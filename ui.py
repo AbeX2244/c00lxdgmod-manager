@@ -8,7 +8,10 @@ import csv
 import html
 import json
 import logging
+import os
 import queue
+import re
+import sys
 import tempfile
 import threading
 import time
@@ -26,25 +29,57 @@ from config import (
     APP_NAME, APP_VERSION, CONFIG_FILE, LOG_FILE,
     DEFAULT_LANG, STRINGS,
     FILTER_DEBOUNCE_MS, PARALLEL_WORKERS, WATCH_POLL_SECONDS,
-    NESTED_WORKERS,
+    NESTED_WORKERS, SCHEMA_CONFIG, RAW_FOLDER_MARKERS,
+    PLACEHOLDER_AUTHORS, FOLDER_SCAN_WARN_THRESHOLD,
     MAX_SUMMARY_LINES,
 )
 from core import (
     HAS_PYZIPPER, HAS_SOURCEPP, extractor_name, human_size, is_gmod_running,
     copy_tree, app_dir, open_folder, safe_name,
+    is_app_dir_writable, is_running_from_temp,
+    load_json_schema,
     GMAExtractor, GMAWriter, Analyzer,
     ZipIndex, Source,
-    CacheManager, SessionManager, CollectionsManager,
+    CacheManager, SessionManager, CollectionsManager, BackupManager,
     read_gma_metadata_file, resolve_gma_metadata_in_zip,
     resolve_folder_metadata, resolve_folder_metadata_in_zip,
     order_sources_by_deps, check_missing_deps, find_duplicates,
     detect_cross_dependencies, detect_auto_conflicts,
 )
+from core import util as core_util
 
 
-# ============================================================
-# Widgets
-# ============================================================
+def _t_en(key, **fmt):
+    d = STRINGS.get("en", {})
+    s = d.get(key, key)
+    if fmt:
+        try:
+            s = s.format(**fmt)
+        except Exception:
+            pass
+    return s
+
+
+def _filter_self_deps(display_name, deps):
+    if not deps:
+        return deps
+    n = (display_name or "").lower() \
+        .replace("'", "").replace(" ", "").replace("|", "")
+    result = []
+    for d in deps:
+        dl = d.lower().replace("'", "").replace(" ", "")
+        if dl and dl in n:
+            continue
+        result.append(d)
+    return result
+
+
+def _clean_author(author):
+    a = (author or "").strip()
+    if a.lower() in PLACEHOLDER_AUTHORS:
+        return ""
+    return a
+
 
 def make_panel(parent, title=None):
     outer = tk.Frame(parent, bg=C_RED, bd=0)
@@ -118,10 +153,6 @@ def center_on_parent(win, parent):
         pass
 
 
-# ============================================================
-# Custom c00lgui dialogs
-# ============================================================
-
 def c00l_choice(parent, title, body, buttons, t):
     win = tk.Toplevel(parent)
     win.title(title)
@@ -134,20 +165,17 @@ def c00l_choice(parent, title, body, buttons, t):
 
     result = {"value": None}
 
-    head = tk.Frame(win, bg=C_RED)
+    head = tk.Frame(win, bg=C_RED, height=44)
     head.pack(side="top", fill="x")
+    head.pack_propagate(False)
     head_in = tk.Frame(head, bg=C_BG)
-    head_in.pack(fill="x", padx=1, pady=1)
+    head_in.pack(fill="both", expand=True, padx=1, pady=1)
     tk.Label(head_in, text=title, bg=C_BG, fg=C_FG, font=F_HEAD,
-             pady=10, padx=16).pack()
+             padx=16).pack(expand=True)
 
-    body_frame = tk.Frame(win, bg=C_BG, padx=20, pady=20)
-    body_frame.pack(side="top", fill="both", expand=True)
-    tk.Label(body_frame, text=body, bg=C_BG, fg=C_FG, font=F_NORM,
-             justify="left", anchor="w", wraplength=460).pack(fill="x")
-
-    btn_row = tk.Frame(win, bg=C_BG, padx=20, pady=(0, 20))
-    btn_row.pack(side="bottom", fill="x")
+    btn_row = tk.Frame(win, bg=C_BG, height=60)
+    btn_row.pack(side="bottom", fill="x", padx=20, pady=(0, 16))
+    btn_row.pack_propagate(False)
 
     def choose(v):
         result["value"] = v
@@ -157,7 +185,14 @@ def c00l_choice(parent, title, body, buttons, t):
         pad_l = 0 if i == 0 else 5
         pad_r = 0 if i == len(buttons) - 1 else 5
         b = make_button(btn_row, label, lambda v=value: choose(v), style=style)
-        b.pack(side="left", expand=True, fill="x", padx=(pad_l, pad_r))
+        b.pack(side="left", expand=True, fill="x",
+               padx=(pad_l, pad_r), pady=8)
+
+    body_frame = tk.Frame(win, bg=C_BG, padx=20, pady=20)
+    body_frame.pack(side="top", fill="both", expand=True)
+    tk.Label(body_frame, text=body, bg=C_BG, fg=C_FG, font=F_NORM,
+             justify="left", anchor="nw", wraplength=460).pack(
+        fill="both", expand=True)
 
     def on_escape(_e):
         result["value"] = None
@@ -168,8 +203,13 @@ def c00l_choice(parent, title, body, buttons, t):
     except Exception:
         pass
 
+    win.update_idletasks()
     center_on_parent(win, parent)
     bring_to_front(win)
+    try:
+        win.update()
+    except Exception:
+        pass
     win.wait_window()
     return result["value"]
 
@@ -188,10 +228,6 @@ def c00l_alert(parent, title, body, t):
     ], t)
 
 
-# ============================================================
-# Main app
-# ============================================================
-
 class GModAddonManager:
     def __init__(self, root):
         self.root = root
@@ -207,6 +243,8 @@ class GModAddonManager:
         self._analysis_stale = False
         self._last_cross_deps = {}
         self._last_auto_conflicts = []
+        self._schema_warn = False
+        self._manage_console = None
 
         self.filter_text = tk.StringVar()
         self.group_mode = tk.BooleanVar(value=False)
@@ -220,6 +258,9 @@ class GModAddonManager:
         self._filter_timer = None
         self._rebuilding = False
         self._last_dialog_dir = str(Path.home())
+        self._cfg_writable = True
+        self._last_watch_folder = ""
+        self._pending_watch_folder = ""
 
         self.status = tk.StringVar(value="Ready.")
         self.lang = DEFAULT_LANG
@@ -235,12 +276,13 @@ class GModAddonManager:
         self.cache = CacheManager()
         self.session = SessionManager()
         self.collections = CollectionsManager()
+        self.backups = BackupManager(lambda: self.dest_entry.get()
+                                       if hasattr(self, "dest_entry") else "")
 
         self.log_q = queue.Queue()
         self.name_q = queue.Queue()
         self._name_worker_running = True
 
-        # Nested zip indexing: single FIFO + fixed worker pool
         self._nested_q = queue.Queue()
         self._nested_lock = threading.Lock()
         self._nested_total = 0
@@ -262,7 +304,15 @@ class GModAddonManager:
         self._log(f"[i] language: {self.lang}")
         self._log(f"[i] {self.t('help_hint')}")
 
-    # ------------------- i18n -------------------
+        try:
+            core_util.check_i18n_consistency()
+        except Exception:
+            pass
+
+        if not core_util.HAS_LOG_FILE:
+            self.root.after(400, self._show_log_missing_warning)
+        if self._schema_warn:
+            self.root.after(600, self._show_schema_warning)
 
     def t(self, key, **fmt):
         d = STRINGS.get(self.lang, STRINGS[DEFAULT_LANG])
@@ -309,10 +359,21 @@ class GModAddonManager:
         finally:
             self._rebuilding = False
 
-    # ------------------- Build -------------------
+    def _show_log_missing_warning(self):
+        try:
+            c00l_alert(self.root, self.t("log_missing_title"),
+                       self.t("log_missing_body"), self.t)
+        except Exception:
+            pass
+
+    def _show_schema_warning(self):
+        try:
+            c00l_alert(self.root, self.t("schema_warning_title"),
+                       self.t("schema_warning_body"), self.t)
+        except Exception:
+            pass
 
     def _build(self):
-        # ---- Menu bar ----
         menubar = tk.Menu(self.root, bg=C_BG, fg=C_FG,
                            activebackground=C_RED, activeforeground=C_FG,
                            tearoff=0, bd=0)
@@ -362,13 +423,16 @@ class GModAddonManager:
         tools_menu.add_command(label=self.t("menu_conflicts"),
                                 command=self._detect_conflicts, accelerator="F8")
         tools_menu.add_separator()
+        tools_menu.add_command(label=self.t("manage_btn"),
+                                command=self._open_manage)
         tools_menu.add_command(label=self.t("repack_btn"), command=self._repack)
         tools_menu.add_command(label=self.t("grep_btn"), command=self._grep)
-        tools_menu.add_command(label=self.t("watch_btn"), command=self._toggle_watch)
-        tools_menu.add_command(label=self.t("collections_btn"),
-                                command=self._open_collections)
-        tools_menu.add_command(label=self.t("report_btn"), command=self._export_html)
-        tools_menu.add_command(label=self.t("sizes_btn"), command=self._show_sizes)
+        tools_menu.add_command(label=self.t("rename_all_btn"),
+                                command=self._rename_all)
+        tools_menu.add_command(label=self.t("report_btn"),
+                                command=self._export_html)
+        tools_menu.add_command(label=self.t("sizes_btn"),
+                                command=self._show_sizes)
         tools_menu.add_command(label=self.t("fastdl_btn"), command=self._fastdl)
         menubar.add_cascade(label=self.t("menu_tools"), menu=tools_menu)
 
@@ -385,7 +449,6 @@ class GModAddonManager:
         except Exception:
             pass
 
-        # ---- Header ----
         top = tk.Frame(self.root, bg=C_BG)
         top.pack(fill="x", side="top")
         title_bar = tk.Frame(top, bg=C_RED)
@@ -426,7 +489,6 @@ class GModAddonManager:
         self.canvas.bind_all("<Button-4>", self._on_wheel_linux)
         self.canvas.bind_all("<Button-5>", self._on_wheel_linux)
 
-        # ---- ADD ----
         body = make_panel(self.body, self.t("add_panel"))
         self.path_entry = make_entry(body)
         self.path_entry.pack(fill="x", pady=(0, 6))
@@ -442,7 +504,6 @@ class GModAddonManager:
         b = make_button(row2, self.t("history_btn"), self._show_history)
         b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_history")
 
-        # ---- FILTER ----
         body = make_panel(self.body, self.t("filter_panel"))
         row = tk.Frame(body, bg=C_BG); row.pack(fill="x")
         tk.Label(row, text=self.t("search_label"), bg=C_BG, fg=C_FG,
@@ -460,7 +521,6 @@ class GModAddonManager:
             disabledforeground=C_FG_DIM)
         self.group_cb.pack(anchor="w", pady=(6, 0))
 
-        # ---- ADDONS ----
         list_panel = tk.Frame(self.body, bg=C_RED, bd=0)
         list_panel.pack(fill="both", expand=True, pady=(0, 8))
         list_inner = tk.Frame(list_panel, bg=C_BG)
@@ -512,7 +572,6 @@ class GModAddonManager:
         self.btn_compact.pack(side="left", expand=True, fill="x", padx=(2, 0))
         self._wire_help(self.btn_compact, "help_compact")
 
-        # ---- DESTINATION ----
         self.dest_panel = make_panel(self.body, self.t("dest_panel"))
         self.dest_entry = make_entry(self.dest_panel)
         self.dest_entry.pack(fill="x", pady=(0, 6))
@@ -521,11 +580,8 @@ class GModAddonManager:
         b = make_button(row, self.t("choose_btn"), self._browse_dest)
         b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_choose_dest")
         b = make_button(row, self.t("open_btn"), self._open_dest)
-        b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_open_dest")
-        b = make_button(row, self.t("backup_btn"), self._backup_dest)
-        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_backup")
+        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_open_dest")
 
-        # ---- ACTIONS ----
         act = tk.Frame(self.body, bg=C_BG); act.pack(fill="x", pady=(0, 4))
         self.btn_analyze = tk.Button(
             act, text=self.t("analyze_btn"), command=self._analyze,
@@ -552,30 +608,25 @@ class GModAddonManager:
         b = make_button(act2, self.t("conflicts_btn"), self._detect_conflicts)
         b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_conflicts")
 
-        # ---- TOOLS ----
         self.tools_panel = make_panel(self.body, self.t("tools_panel"))
         r1 = tk.Frame(self.tools_panel, bg=C_BG); r1.pack(fill="x")
+        b = make_button(r1, self.t("manage_btn"), self._open_manage)
+        b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_manage")
         b = make_button(r1, self.t("repack_btn"), self._repack)
-        b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_repack")
+        b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_repack")
         b = make_button(r1, self.t("grep_btn"), self._grep)
-        b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_grep")
-        b = make_button(r1, self.t("rename_all_btn"), self._rename_all)
-        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_rename_all")
+        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_grep")
         r2 = tk.Frame(self.tools_panel, bg=C_BG); r2.pack(fill="x", pady=(4, 0))
-        self.btn_watch = make_button(r2, self.t("watch_btn"), self._toggle_watch)
-        self.btn_watch.pack(side="left", expand=True, fill="x", padx=(0, 2))
-        self._wire_help(self.btn_watch, "help_watch")
-        b = make_button(r2, self.t("collections_btn"), self._open_collections)
-        b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_collections")
+        b = make_button(r2, self.t("rename_all_btn"), self._rename_all)
+        b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_rename_all")
         b = make_button(r2, self.t("report_btn"), self._export_html)
-        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_report")
+        b.pack(side="left", expand=True, fill="x", padx=2); self._wire_help(b, "help_report")
+        b = make_button(r2, self.t("sizes_btn"), self._show_sizes)
+        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_sizes")
         r3 = tk.Frame(self.tools_panel, bg=C_BG); r3.pack(fill="x", pady=(4, 0))
-        b = make_button(r3, self.t("sizes_btn"), self._show_sizes)
-        b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_sizes")
         b = make_button(r3, self.t("fastdl_btn"), self._fastdl)
-        b.pack(side="left", expand=True, fill="x", padx=(2, 0)); self._wire_help(b, "help_fastdl")
+        b.pack(side="left", expand=True, fill="x", padx=(0, 2)); self._wire_help(b, "help_fastdl")
 
-        # ---- PROGRESS ----
         prog_panel = tk.Frame(self.body, bg=C_RED, bd=0)
         prog_panel.pack(fill="x", pady=(0, 4))
         prog_inner = tk.Frame(prog_panel, bg=C_BG)
@@ -597,7 +648,6 @@ class GModAddonManager:
                                          anchor="w")
         self.progress_label.pack(fill="x", pady=(0, 8))
 
-        # ---- LOG ----
         log_panel = tk.Frame(self.body, bg=C_RED, bd=0)
         log_panel.pack(fill="both", expand=True, pady=(0, 0))
         log_inner = tk.Frame(log_panel, bg=C_BG)
@@ -629,7 +679,6 @@ class GModAddonManager:
         lsb.pack(side="right", fill="y")
         self.log.config(yscrollcommand=lsb.set, state="disabled")
 
-        # ---- Status bar ----
         status = tk.Label(self.root, textvariable=self.status,
                            bg=C_RED, fg=C_FG, font=F_SMALL,
                            anchor="w", padx=8, pady=3)
@@ -643,8 +692,6 @@ class GModAddonManager:
                 pass
 
         self._update_counts()
-
-    # ------------------- Shortcuts -------------------
 
     def _bind_shortcuts(self):
         r = self.root
@@ -667,8 +714,6 @@ class GModAddonManager:
             except Exception:
                 pass
 
-    # ------------------- Scroll -------------------
-
     def _on_wheel(self, event):
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
@@ -677,8 +722,6 @@ class GModAddonManager:
             self.canvas.yview_scroll(-1, "units")
         elif event.num == 5:
             self.canvas.yview_scroll(1, "units")
-
-    # ------------------- Help wiring -------------------
 
     def _wire_help(self, widget, help_key):
         def on_enter(_e):
@@ -694,8 +737,6 @@ class GModAddonManager:
                     pass
         widget.bind("<Enter>", on_enter, add="+")
         widget.bind("<Leave>", on_leave, add="+")
-
-    # ------------------- Log -------------------
 
     def _log(self, msg):
         self.log_q.put(str(msg))
@@ -715,10 +756,23 @@ class GModAddonManager:
                     self.log.config(state="disabled")
                 except Exception:
                     pass
+                if self._manage_console is not None:
+                    try:
+                        self._manage_console.config(state="normal")
+                        self._manage_console.insert("end", msg + "\n")
+                        self._manage_console.see("end")
+                        self._manage_console.config(state="disabled")
+                    except Exception:
+                        pass
         except queue.Empty:
             pass
         try:
             self._check_nested_completion()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_watch_status_lbl"):
+                self._refresh_watch_status()
         except Exception:
             pass
         self.root.after(120, self._poll_log)
@@ -748,8 +802,6 @@ class GModAddonManager:
             c00l_alert(self.root, self.t("no_log_title"),
                        self.t("no_log_body"), self.t)
 
-    # ------------------- Progress -------------------
-
     def _set_progress(self, value, maximum=100, text=""):
         def upd():
             self._progress_max = max(1, maximum)
@@ -757,10 +809,11 @@ class GModAddonManager:
             self._draw_progress()
             if text:
                 eta = self._eta_text(value, maximum)
+                label = text
                 if eta:
-                    text = f"{text}   {self.t('eta_prefix', eta=eta)}"
-                self.progress_label.config(text=text)
-                self.status.set(text)
+                    label = f"{label}   {self.t('eta_prefix', eta=eta)}"
+                self.progress_label.config(text=label)
+                self.status.set(label)
             else:
                 pct = int(100 * value / max(1, maximum))
                 label = f"{value}/{maximum} ({pct}%)"
@@ -826,27 +879,27 @@ class GModAddonManager:
         except Exception:
             pass
 
-    # ------------------- Config -------------------
-
     def _cfg_file(self):
         return app_dir() / CONFIG_FILE
 
     def _load_cfg(self):
-        try:
-            with open(self._cfg_file(), encoding="utf-8") as f:
-                data = json.load(f)
+        data, ok = load_json_schema(self._cfg_file(), SCHEMA_CONFIG, "config")
+        self._cfg_writable = ok
+        if not ok:
+            self._pending_dest = ""
+            self.lang = DEFAULT_LANG
+            self.recent_paths = []
+            self._pending_geometry = None
+            self._last_dialog_dir = str(Path.home())
+            self._schema_warn = True
+        else:
             self._pending_dest = data.get("dest", "")
             lang = data.get("lang", DEFAULT_LANG)
             self.lang = lang if lang in STRINGS else DEFAULT_LANG
             self.recent_paths = data.get("recent", [])[:10]
             self._pending_geometry = data.get("geometry")
             self._last_dialog_dir = data.get("last_dir", str(Path.home()))
-        except Exception:
-            self._pending_dest = ""
-            self.lang = DEFAULT_LANG
-            self.recent_paths = []
-            self._pending_geometry = None
-            self._last_dialog_dir = str(Path.home())
+            self._schema_warn = False
 
         geo = getattr(self, "_pending_geometry", None)
         if geo:
@@ -865,6 +918,8 @@ class GModAddonManager:
                 pass
 
     def _save_cfg(self):
+        if not getattr(self, "_cfg_writable", True):
+            return
         try:
             dest = ""
             try:
@@ -877,6 +932,7 @@ class GModAddonManager:
                 geo = ""
             with open(self._cfg_file(), "w", encoding="utf-8") as f:
                 json.dump({
+                    "schema": SCHEMA_CONFIG,
                     "dest": dest,
                     "lang": self.lang,
                     "recent": self.recent_paths[:10],
@@ -924,8 +980,6 @@ class GModAddonManager:
             return
         open_folder(p)
 
-    # ------------------- Session -------------------
-
     def _load_session(self):
         sources = self.session.load()
         for s in sources:
@@ -940,8 +994,6 @@ class GModAddonManager:
             self._rebuild_list()
             self._log(f"[i] Session restored: {len(sources)} addon(s).")
             self._set_status(self.t("status_session", n=len(sources)))
-
-    # ------------------- Add -------------------
 
     def _browse(self):
         try:
@@ -1047,11 +1099,67 @@ class GModAddonManager:
         center_on_parent(win, self.root)
         bring_to_front(win)
 
+    def _mark_stale(self):
+        if self._analyzed:
+            self._analysis_stale = True
+        if self.group_mode.get():
+            self.group_mode.set(False)
+        try:
+            self.group_cb.config(state="disabled")
+        except Exception:
+            pass
+
+    def _looks_like_raw_addon(self, folder: Path) -> bool:
+        try:
+            if (folder / "addon.json").exists():
+                return True
+            children = {p.name.lower() for p in folder.iterdir()
+                        if p.is_dir()}
+        except OSError:
+            return False
+        return bool(children & RAW_FOLDER_MARKERS)
+
+    def _scan_folder_for_addons(self, folder: Path) -> list:
+        results = []
+        try:
+            for root, _, files in os.walk(folder):
+                for f in files:
+                    low = f.lower()
+                    if low.endswith(".gma") or low.endswith(".zip"):
+                        results.append(Path(root) / f)
+        except Exception as e:
+            self._log(f"[!] Error scanning {folder}: {e}")
+        results.sort()
+        return results
+
     def _register(self, path):
         path = Path(path)
         if path.is_dir():
+            if self._looks_like_raw_addon(path):
+                self._add_folder(path)
+                return
+            found = self._scan_folder_for_addons(path)
+            if found:
+                n = len(found)
+                if n > FOLDER_SCAN_WARN_THRESHOLD:
+                    if not c00l_confirm(
+                            self.root, self.t("folder_scan_title"),
+                            self.t("folder_scan_body",
+                                   name=path.name, n=n),
+                            self.t("folder_scan_yes"),
+                            self.t("cancel_btn"), self.t):
+                        return
+                self._log(f"[OK] {path.name}: {n} addon file(s) found")
+                self._set_status(self.t("status_folder_scanned",
+                                         name=path.name, n=n))
+                for f in found:
+                    self._register_file(f)
+                return
             self._add_folder(path)
             return
+        self._register_file(path)
+
+    def _register_file(self, path: Path):
         suf = path.suffix.lower()
         if suf == ".gma":
             self._add_gma(path)
@@ -1073,7 +1181,7 @@ class GModAddonManager:
         s = Source(kind="gma", path=path, name=name,
                    origin=origin, metadata=meta)
         self.sources.append(s)
-        self._analysis_stale = True
+        self._mark_stale()
 
     def _add_folder(self, path, origin="", name=""):
         if any(s.kind == "folder" and s.path == path for s in self.sources):
@@ -1085,7 +1193,7 @@ class GModAddonManager:
                    name=real or name or path.name,
                    origin=origin, metadata=meta)
         self.sources.append(s)
-        self._analysis_stale = True
+        self._mark_stale()
 
     def _add_zip_source(self, root_zip, chain, entry, kind, name, origin):
         for s in self.sources:
@@ -1096,7 +1204,7 @@ class GModAddonManager:
                    entry=entry, name=name, origin=origin)
         self.sources.append(s)
         self.name_q.put(s)
-        self._analysis_stale = True
+        self._mark_stale()
         return s
 
     def _add_zip(self, zip_path):
@@ -1137,8 +1245,6 @@ class GModAddonManager:
             self._log(f"[OK] {zip_path.name}: {direct} addon(s)")
             self._set_status(self.t("status_added_zip",
                                      name=zip_path.name, n=direct))
-
-    # ---------------- Nested zip worker pool ----------------
 
     def _start_nested_workers(self):
         with self._nested_lock:
@@ -1241,8 +1347,6 @@ class GModAddonManager:
             self._add_zip_source(root_zip, e.chain, e.entry, "zip_folder",
                                  name=nm, origin=root_zip.name)
 
-    # ------------------- Filter -------------------
-
     def _on_filter_change(self):
         if self._filter_timer is not None:
             try:
@@ -1265,8 +1369,6 @@ class GModAddonManager:
                 self.btn_compact.config(bg=C_BG, fg=C_FG)
         except Exception:
             pass
-
-    # ------------------- List rebuild -------------------
 
     def _rebuild_list(self):
         self._filter_timer = None
@@ -1428,7 +1530,7 @@ class GModAddonManager:
             self.sources.remove(s)
         except ValueError:
             return
-        self._analysis_stale = True
+        self._mark_stale()
         self._rebuild_list()
 
     def _on_row_double(self, s):
@@ -1509,7 +1611,7 @@ class GModAddonManager:
         if not new:
             return
         s.name = new.strip()
-        self._analysis_stale = True
+        self._mark_stale()
         self._refresh_row(s)
 
     def _rename_all(self):
@@ -1530,7 +1632,7 @@ class GModAddonManager:
                 self._refresh_row(s)
             except Exception as e:
                 self._log(f"[!] Rename {s.name}: {e}")
-        self._analysis_stale = True
+        self._mark_stale()
         self._log(f"[OK] Renamed {len(selected)} addon(s).")
 
     def _open_source_temp(self, s):
@@ -1568,7 +1670,7 @@ class GModAddonManager:
         self.sources = [s for s in self.sources if not s.selected]
         removed = n - len(self.sources)
         if removed:
-            self._analysis_stale = True
+            self._mark_stale()
         self._rebuild_list()
         self._set_status(self.t("status_removed", n=removed))
 
@@ -1583,8 +1685,6 @@ class GModAddonManager:
             pass
         self._rebuild_list()
         self._set_status(self.t("status_cleared", n=n))
-
-    # ------------------- Metadata worker -------------------
 
     def _start_name_worker(self):
         def worker():
@@ -1634,8 +1734,6 @@ class GModAddonManager:
         else:
             self._refresh_row(target)
 
-    # ------------------- Materialization -------------------
-
     def _materialize(self, source, tmp_dir):
         if source.kind == "gma":
             return ("gma", source.path)
@@ -1648,8 +1746,6 @@ class GModAddonManager:
                 kind="gma" if source.kind == "zip_gma" else "folder")
             return ZipIndex.materialize(entry, tmp_dir)
         raise ValueError(f"unknown kind: {source.kind}")
-
-    # ------------------- Busy -------------------
 
     def _set_busy(self, busy):
         self.busy = busy
@@ -1681,8 +1777,6 @@ class GModAddonManager:
         self.cancel_flag.set()
         self._log("[!] Cancel requested...")
         self._set_status(self.t("status_cancel_requested"))
-
-    # ------------------- Analyze -------------------
 
     def _analyze(self):
         if self.busy:
@@ -1747,7 +1841,7 @@ class GModAddonManager:
                     else:
                         r = self.analyzer.scan(real)
                 entry["file_count"] = r["file_count"]
-                entry["deps"] = r["deps"]
+                entry["deps"] = _filter_self_deps(display_name, r["deps"])
                 entry["refs"] = len(r["refs"])
                 entry["dangers"] = r.get("dangers", [])
                 entry["by_ext"] = r.get("by_ext", {})
@@ -1763,7 +1857,7 @@ class GModAddonManager:
                 entry["lua_file_count"] = r.get("lua_file_count", 0)
                 if fp:
                     self.cache.put(fp, {
-                        "deps": r["deps"],
+                        "deps": entry["deps"],
                         "file_count": r["file_count"],
                         "refs": len(r["refs"]),
                         "dangers": r.get("dangers", []),
@@ -1808,6 +1902,7 @@ class GModAddonManager:
                         "deps": entry.get("deps", []),
                         "file_count": entry.get("file_count", 0),
                         "orphan_refs": entry.get("orphan_refs", set()),
+                        "by_ext": entry.get("by_ext", {}),
                     })
                     completed += 1
                     self._log(f"[{completed}/{total}] {s.display}")
@@ -2068,109 +2163,46 @@ class GModAddonManager:
             text = self._format_summary(results, cancelled)
         except Exception:
             text = "ERROR building summary:\n\n" + traceback.format_exc()
-        if not text.strip():
-            text = "(empty summary — no content generated)"
+        if not text or not text.strip():
+            text = "(summary is empty — internal error)\n\n"
+            text += f"results={len(results)} cancelled={cancelled}\n"
+
+        self._log(f"[i] Summary: {len(text)} chars, "
+                  f"{text.count(chr(10)) + 1} lines")
 
         win = tk.Toplevel(self.root)
         win.title(self.t("summary_btn"))
-        win.geometry("720x700")
-        win.minsize(560, 420)
+        win.geometry("760x640")
         win.configure(bg=C_BG)
         try:
             win.transient(self.root)
         except Exception:
             pass
 
-        head = tk.Frame(win, bg=C_RED)
-        head.pack(side="top", fill="x")
-        head_in = tk.Frame(head, bg=C_BG)
-        head_in.pack(fill="x", padx=1, pady=1)
-        tk.Label(head_in, text=self.t("summary_btn"), bg=C_BG, fg=C_FG,
-                 font=F_HEAD, pady=8).pack()
-        sub = "Partial results" if cancelled else f"{len(results)} addon(s)"
-        tk.Label(head_in, text=sub, bg=C_BG, fg=C_FG_DIM,
-                 font=F_SMALL).pack(pady=(0, 6))
+        header = tk.Frame(win, bg=C_RED, height=48)
+        header.pack(side="top", fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text=self.t("summary_btn"), bg=C_RED, fg=C_FG,
+                 font=F_HEAD).pack(expand=True)
 
-        footer = tk.Frame(win, bg=C_BG, padx=8, pady=8)
+        footer = tk.Frame(win, bg=C_BG, height=48)
         footer.pack(side="bottom", fill="x")
-
-        search_row = tk.Frame(win, bg=C_BG, padx=8, pady=(4, 0))
-        search_row.pack(side="bottom", fill="x")
-        tk.Label(search_row, text=self.t("search_label"), bg=C_BG, fg=C_FG,
-                 font=F_SMALL).pack(side="left")
-        search_var = tk.StringVar()
-        search_entry = make_entry(search_row, textvariable=search_var)
-        search_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
-        search_label = tk.Label(search_row, text="", bg=C_BG, fg=C_FG_DIM,
-                                  font=F_SMALL, width=16, anchor="e")
-        search_label.pack(side="right")
+        footer.pack_propagate(False)
 
         body = tk.Frame(win, bg=C_BG)
-        body.pack(side="top", fill="both", expand=True, padx=8, pady=8)
-        tf = tk.Frame(body, bg=C_BG)
-        tf.pack(side="top", fill="both", expand=True)
+        body.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
-        txt = tk.Text(tf, wrap="word", font=F_LOG,
-                      bg=C_BG, fg=C_FG,
-                      insertbackground=C_RED, relief="flat",
+        txt = tk.Text(body, wrap="word", font=F_LOG,
+                      bg=C_BG, fg=C_FG, insertbackground=C_RED,
+                      relief="flat", borderwidth=0,
                       highlightbackground=C_RED, highlightthickness=1,
-                      padx=6, pady=6, height=20, width=80)
+                      padx=8, pady=8)
+        scrollbar = make_scrollbar(body, "vertical", txt.yview)
+        scrollbar.pack(side="right", fill="y")
         txt.pack(side="left", fill="both", expand=True)
-        sb = make_scrollbar(tf, "vertical", txt.yview)
-        sb.pack(side="right", fill="y")
-        txt.config(yscrollcommand=sb.set)
+        txt.config(yscrollcommand=scrollbar.set)
         txt.insert("1.0", text)
         txt.config(state="disabled")
-
-        def highlight_matches(*_):
-            try:
-                txt.config(state="normal")
-            except Exception:
-                pass
-            try:
-                txt.tag_remove("search", "1.0", "end")
-            except Exception:
-                pass
-            needle = search_var.get().strip().lower()
-            if not needle:
-                try:
-                    search_label.config(text="")
-                except Exception:
-                    pass
-                try:
-                    txt.config(state="disabled")
-                except Exception:
-                    pass
-                return
-            count = 0
-            start = "1.0"
-            while True:
-                pos = txt.search(needle, start, stopindex="end", nocase=True)
-                if not pos:
-                    break
-                end = f"{pos}+{len(needle)}c"
-                txt.tag_add("search", pos, end)
-                start = end
-                count += 1
-                if count > 500:
-                    break
-            try:
-                txt.tag_config("search", background=C_RED, foreground=C_FG)
-            except Exception:
-                pass
-            try:
-                if count:
-                    search_label.config(text=self.t("search_found", n=count))
-                else:
-                    search_label.config(text=self.t("search_none"))
-            except Exception:
-                pass
-            try:
-                txt.config(state="disabled")
-            except Exception:
-                pass
-
-        search_var.trace_add("write", highlight_matches)
 
         def do_copy():
             try:
@@ -2180,10 +2212,10 @@ class GModAddonManager:
             except Exception:
                 pass
 
-        make_button(footer, self.t("close_btn"), win.destroy).pack(
-            side="right", expand=True, fill="x", padx=(3, 0))
-        make_button(footer, self.t("copy_btn"), do_copy).pack(
-            side="right", expand=True, fill="x", padx=(0, 3))
+        btn_close = make_button(footer, self.t("close_btn"), win.destroy)
+        btn_close.pack(side="right", padx=(6, 12), pady=8)
+        btn_copy = make_button(footer, self.t("copy_btn"), do_copy)
+        btn_copy.pack(side="right", pady=8)
 
         center_on_parent(win, self.root)
         bring_to_front(win)
@@ -2200,8 +2232,6 @@ class GModAddonManager:
             return
         r, c = self.last_results
         self._show_summary(r, c)
-
-    # ------------------- Conflicts -------------------
 
     def _detect_conflicts(self):
         if self.busy:
@@ -2284,27 +2314,33 @@ class GModAddonManager:
         win.title(f"{self.t('conflicts_btn')} ({total})")
         win.geometry("640x540")
         win.configure(bg=C_BG)
-        frame = tk.Frame(win, bg=C_BG, padx=10, pady=10)
-        frame.pack(fill="both", expand=True)
-        tk.Label(frame, text=f"{self.t('conflicts_btn')} ({total})",
-                 bg=C_BG, fg=C_FG, font=F_HEAD).pack(side="top", anchor="w")
-        tf = tk.Frame(frame, bg=C_BG)
-        tf.pack(side="top", fill="both", expand=True, pady=(6, 0))
-        txt = tk.Text(tf, wrap="word", font=F_LOG, bg=C_BG, fg=C_FG,
+
+        header = tk.Frame(win, bg=C_RED, height=44)
+        header.pack(side="top", fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text=f"{self.t('conflicts_btn')} ({total})",
+                 bg=C_RED, fg=C_FG, font=F_HEAD).pack(expand=True)
+
+        footer = tk.Frame(win, bg=C_BG, height=48)
+        footer.pack(side="bottom", fill="x")
+        footer.pack_propagate(False)
+        make_button(footer, self.t("close_btn"), win.destroy).pack(
+            side="right", padx=(6, 12), pady=8)
+
+        body = tk.Frame(win, bg=C_BG)
+        body.pack(side="top", fill="both", expand=True, padx=10, pady=10)
+        txt = tk.Text(body, wrap="word", font=F_LOG, bg=C_BG, fg=C_FG,
                       relief="flat", highlightbackground=C_RED,
                       highlightthickness=1)
+        scrollbar = make_scrollbar(body, "vertical", txt.yview)
+        scrollbar.pack(side="right", fill="y")
         txt.pack(side="left", fill="both", expand=True)
-        sb = make_scrollbar(tf, "vertical", txt.yview)
-        sb.pack(side="right", fill="y")
-        txt.config(yscrollcommand=sb.set)
+        txt.config(yscrollcommand=scrollbar.set)
         txt.insert("1.0", text)
         txt.config(state="disabled")
-        make_button(frame, self.t("close_btn"), win.destroy).pack(
-            side="bottom", anchor="e", pady=(8, 0))
+
         center_on_parent(win, self.root)
         bring_to_front(win)
-
-    # ------------------- Export -------------------
 
     def _export_menu(self):
         menu = tk.Menu(self.root, tearoff=0, bg=C_BG, fg=C_FG,
@@ -2347,7 +2383,7 @@ class GModAddonManager:
                         w.writerow([s.name, s.kind, s.origin,
                                      ", ".join(m.get("deps", [])),
                                      m.get("file_count", ""),
-                                     m.get("author", ""),
+                                     _clean_author(m.get("author", "")),
                                      (m.get("description", "") or "").replace("\n", " ")])
             elif fmt == "json":
                 data = [{"name": s.name, "kind": s.kind, "origin": s.origin,
@@ -2383,7 +2419,7 @@ class GModAddonManager:
                 m = s.metadata or {}
                 deps = ", ".join(m.get("deps", [])) or "-"
                 files = m.get("file_count", "-")
-                author = m.get("author", "") or "-"
+                author = _clean_author(m.get("author", "")) or "-"
                 rows.append(
                     f"<tr><td>{html.escape(s.name)}</td>"
                     f"<td>{html.escape(s.kind)}</td>"
@@ -2391,11 +2427,29 @@ class GModAddonManager:
                     f"<td>{html.escape(deps)}</td>"
                     f"<td>{html.escape(author)}</td>"
                     f"<td>{html.escape(s.origin)}</td></tr>")
+
+            # Include the full summary (if available)
+            summary_html = ""
+            if self.last_results:
+                try:
+                    summary_text = self._format_summary(self.last_results[0],
+                                                          self.last_results[1])
+                    summary_html = (
+                        "<h2>Analysis summary</h2>"
+                        "<pre class=\"summary\">" +
+                        html.escape(summary_text) +
+                        "</pre>")
+                except Exception:
+                    pass
+
             doc = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>GMod Addon Manager Report</title>
 <style>
 body {{ background:#000; color:#fff; font-family:Consolas, monospace; padding:20px; }}
 h1 {{ color:#ff0000; border-bottom:2px solid #ff0000; padding-bottom:8px; }}
+h2 {{ color:#ff0000; margin-top:32px; }}
+pre.summary {{ background:#1a0000; border-left:3px solid #ff0000; padding:12px;
+  white-space:pre-wrap; font-size:12px; line-height:1.4; color:#e0e0e0; }}
 table {{ border-collapse:collapse; width:100%; margin-top:16px; }}
 th {{ background:#ff0000; color:#fff; padding:8px; text-align:left; }}
 td {{ border-bottom:1px solid #3a0000; padding:6px 8px; }}
@@ -2404,6 +2458,7 @@ tr:hover {{ background:#1a0000; }}
 </style></head><body>
 <h1>GMod Addon Manager Report</h1>
 <p class="meta">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &middot; {len(self.sources)} addon(s)</p>
+{summary_html}
 <table><thead><tr>
 <th>Name</th><th>Type</th><th>Files</th><th>Deps</th><th>Author</th><th>Origin</th>
 </tr></thead><tbody>{''.join(rows)}</tbody></table>
@@ -2414,8 +2469,6 @@ tr:hover {{ background:#1a0000; }}
             open_folder(Path(path).parent)
         except Exception as e:
             c00l_alert(self.root, self.t("error_title"), str(e), self.t)
-
-    # ------------------- Extract -------------------
 
     def _extract(self):
         if self.busy:
@@ -2587,60 +2640,6 @@ tr:hover {{ background:#1a0000; }}
         finally:
             self.root.after(0, lambda: self._set_busy(False))
 
-    # ------------------- Backup -------------------
-
-    def _backup_dest(self):
-        d = self.dest_entry.get().strip()
-        if not d:
-            c00l_alert(self.root, self.t("no_dest_title"),
-                       self.t("no_dest_body"), self.t)
-            return
-        dest = Path(d)
-        if not dest.is_dir():
-            c00l_alert(self.root, self.t("dest_missing_title"),
-                       str(dest), self.t)
-            return
-        import shutil as _shutil
-        try:
-            total_size = 0
-            for child in dest.iterdir():
-                if not child.is_dir() or child.name.startswith("."):
-                    continue
-                for root, _, files in os.walk(child):
-                    for f in files:
-                        try:
-                            total_size += (Path(root) / f).stat().st_size
-                        except Exception:
-                            pass
-            usage = _shutil.disk_usage(dest)
-            if total_size > usage.free * 0.9:
-                if not c00l_confirm(
-                        self.root, self.t("backup_title"),
-                        f"Backup needs ~{human_size(total_size)}, "
-                        f"only {human_size(usage.free)} free.\n\nContinue?",
-                        self.t("backup_btn"), self.t("cancel_btn"), self.t):
-                    return
-        except Exception:
-            pass
-
-        backup_root = dest / ".backup" / datetime.now().strftime("%Y%m%d_%H%M%S")
-        count = 0
-        try:
-            for child in dest.iterdir():
-                if not child.is_dir():
-                    continue
-                if child.name.startswith("."):
-                    continue
-                target = backup_root / child.name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                copy_tree(child, target)
-                count += 1
-            self._log(self.t("backup_done", n=count, path=str(backup_root)))
-        except Exception as e:
-            c00l_alert(self.root, self.t("error_title"), str(e), self.t)
-
-    # ------------------- Repack -------------------
-
     def _repack(self):
         folders = []
         for s in self.sources:
@@ -2669,8 +2668,6 @@ tr:hover {{ background:#1a0000; }}
             self._log(f"[OK] Repacked: {out}")
         except Exception as e:
             c00l_alert(self.root, self.t("error_title"), str(e), self.t)
-
-    # ------------------- Grep -------------------
 
     def _grep(self):
         needle = simpledialog.askstring(self.t("grep_title"),
@@ -2753,133 +2750,14 @@ tr:hover {{ background:#1a0000; }}
         finally:
             self.root.after(0, lambda: self._set_busy(False))
 
-    # ------------------- Watch -------------------
-
-    def _toggle_watch(self):
-        if self._watch_thread and self._watch_thread.is_alive():
-            self._watch_stop.set()
-            self._log(self.t("watch_stopped"))
-            self._set_status(self.t("watch_stopped"))
-            try:
-                self.btn_watch.config(bg=C_BG, fg=C_FG)
-            except Exception:
-                pass
-            return
-        folder = filedialog.askdirectory(title=self.t("watch_prompt"),
-                                          initialdir=self._last_dialog_dir)
-        if not folder:
-            return
-        self._watch_stop.clear()
-        self._watch_seen.clear()
-        self._log(self.t("watch_started", path=folder))
-        self._set_status(self.t("watch_started", path=folder))
-        self._watch_thread = threading.Thread(
-            target=self._watch_loop, args=(Path(folder),), daemon=True)
-        self._watch_thread.start()
-        try:
-            self.btn_watch.config(bg=C_RED, fg=C_FG)
-        except Exception:
-            pass
-
-    def _watch_loop(self, folder):
-        while not self._watch_stop.is_set():
-            try:
-                for p in folder.iterdir():
-                    if p.is_file() and p.suffix.lower() in (".gma", ".zip"):
-                        key = str(p)
-                        if key not in self._watch_seen:
-                            self._watch_seen.add(key)
-                            self._log(self.t("watch_new", name=p.name))
-                            self.root.after(0, lambda pp=p: self._register(pp))
-                            self.root.after(0, self._rebuild_list)
-            except Exception:
-                pass
-            time.sleep(WATCH_POLL_SECONDS)
-
-    # ------------------- Collections -------------------
-
-    def _open_collections(self):
-        win = tk.Toplevel(self.root)
-        win.title(self.t("collections_title"))
-        win.geometry("520x480")
-        win.configure(bg=C_BG)
-        win.resizable(False, False)
-        frame = tk.Frame(win, bg=C_BG, padx=8, pady=8)
-        frame.pack(fill="both", expand=True)
-        listbox = tk.Listbox(frame, font=F_NORM, bg=C_BG, fg=C_FG,
-                              selectmode=tk.SINGLE, highlightthickness=1,
-                              highlightbackground=C_RED,
-                              selectbackground=C_RED,
-                              selectforeground=C_FG, bd=0, height=14)
-        listbox.pack(side="left", fill="both", expand=True)
-        sb = make_scrollbar(frame, "vertical", listbox.yview)
-        sb.pack(side="right", fill="y")
-        listbox.config(yscrollcommand=sb.set)
-
-        def refresh():
-            listbox.delete(0, "end")
-            for name in self.collections.list_collections():
-                listbox.insert("end", name)
-        refresh()
-
-        def save_current():
-            name = simpledialog.askstring(self.t("collections_title"),
-                                           self.t("collections_name"),
-                                           parent=win)
-            if not name:
-                return
-            self.collections.save_collection(name, self.sources)
-            self._log(self.t("collections_saved", name=name))
-            refresh()
-
-        def load_selected():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            name = listbox.get(sel[0])
-            loaded = self.collections.load_collection(name)
-            existing = {(s.kind, str(s.path), s.entry) for s in self.sources}
-            added = 0
-            for s in loaded:
-                key = (s.kind, str(s.path), s.entry)
-                if key in existing:
-                    continue
-                self.sources.append(s)
-                if s.kind in ("zip_gma", "zip_folder"):
-                    self.name_q.put(s)
-                added += 1
-            self._rebuild_list()
-            self._log(f"[OK] Loaded {added} addon(s) from '{name}'")
-            win.destroy()
-
-        def delete_selected():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            name = listbox.get(sel[0])
-            if c00l_confirm(win, self.t("collections_title"),
-                             f"Delete '{name}'?",
-                             "Delete", self.t("cancel_btn"), self.t):
-                self.collections.delete_collection(name)
-                refresh()
-
-        row = tk.Frame(win, bg=C_BG, padx=8, pady=8)
-        make_button(row, self.t("collections_save"), save_current).pack(
-            side="left", expand=True, fill="x", padx=(0, 2))
-        make_button(row, self.t("collections_load"), load_selected).pack(
-            side="left", expand=True, fill="x", padx=2)
-        make_button(row, "DEL", delete_selected).pack(
-            side="left", expand=True, fill="x", padx=(2, 0))
-        row.pack(side="bottom", fill="x")
-        center_on_parent(win, self.root)
-        bring_to_front(win)
-
-    # ------------------- Sizes -------------------
-
     def _show_sizes(self):
         if not self.sources:
             c00l_alert(self.root, self.t("export_empty_title"),
                        self.t("export_empty_body"), self.t)
+            return
+        if self._analysis_stale or not self._analyzed:
+            c00l_alert(self.root, self.t("stale_title"),
+                       self.t("stale_body"), self.t)
             return
         agg = {}
         for s in self.sources:
@@ -2917,8 +2795,6 @@ tr:hover {{ background:#1a0000; }}
                                font=("Consolas", 9))
         center_on_parent(win, self.root)
         bring_to_front(win)
-
-    # ------------------- FastDL -------------------
 
     def _fastdl(self):
         active = [s for s in self.sources if s.selected]
@@ -2976,7 +2852,589 @@ tr:hover {{ background:#1a0000; }}
             self.root.after(0, lambda: self._set_busy(False))
             self.root.after(0, lambda: self._reset_progress())
 
-    # ------------------- Help dialogs -------------------
+    # ------------------- MANAGE dialog -------------------
+
+    def _open_manage(self, initial_tab="backups"):
+        win = tk.Toplevel(self.root)
+        win.title(self.t("manage_btn"))
+        win.geometry("760x680")
+        win.minsize(620, 540)
+        win.configure(bg=C_BG)
+        try:
+            win.transient(self.root)
+        except Exception:
+            pass
+
+        header = tk.Frame(win, bg=C_RED, height=44)
+        header.pack(side="top", fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text=self.t("manage_btn"), bg=C_RED, fg=C_FG,
+                 font=F_HEAD).pack(expand=True)
+
+        footer = tk.Frame(win, bg=C_BG, height=48)
+        footer.pack(side="bottom", fill="x")
+        footer.pack_propagate(False)
+
+        def close_manage():
+            self._manage_console = None
+            win.destroy()
+
+        make_button(footer, self.t("close_btn"), close_manage).pack(
+            side="right", padx=(6, 12), pady=8)
+
+        console_frame = tk.Frame(win, bg=C_BG)
+        console_frame.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+
+        tk.Label(console_frame, text=self.t("log_panel"), bg=C_BG,
+                 fg=C_FG_DIM, font=F_SMALL, anchor="w").pack(fill="x")
+
+        console_inner = tk.Frame(console_frame, bg=C_BG)
+        console_inner.pack(fill="x", pady=(2, 0))
+
+        console = tk.Text(console_inner, height=6, wrap="word",
+                          font=F_LOG, bg=C_BG, fg=C_FG,
+                          insertbackground=C_RED, relief="flat",
+                          padx=6, pady=4, bd=0,
+                          highlightbackground=C_RED,
+                          highlightthickness=1, state="disabled")
+        console.pack(side="left", fill="both", expand=True)
+        csb = make_scrollbar(console_inner, "vertical", console.yview)
+        csb.pack(side="right", fill="y")
+        console.config(yscrollcommand=csb.set)
+
+        try:
+            content = self.log.get("1.0", "end-1c")
+            lines = content.splitlines()[-50:]
+            console.config(state="normal")
+            console.insert("1.0", "\n".join(lines))
+            console.see("end")
+            console.config(state="disabled")
+        except Exception:
+            pass
+
+        self._manage_console = console
+
+        tab_bar = tk.Frame(win, bg=C_BG)
+        tab_bar.pack(side="top", fill="x")
+
+        tk.Frame(win, bg=C_RED_DIM, height=1).pack(side="top", fill="x")
+
+        body = tk.Frame(win, bg=C_BG)
+        body.pack(side="top", fill="both", expand=True)
+
+        tab_defs = [
+            ("backups", self.t("tab_backups")),
+            ("watch", self.t("tab_watch")),
+            ("collections", self.t("tab_collections")),
+            ("maintenance", self.t("tab_maintenance")),
+        ]
+
+        tab_btns = {}
+        builders = {
+            "backups": self._build_backups_tab,
+            "watch": self._build_watch_tab,
+            "collections": self._build_collections_tab,
+            "maintenance": self._build_maintenance_tab,
+        }
+
+        def show(key):
+            for k, b in tab_btns.items():
+                if k == key:
+                    b.config(bg=C_RED, fg=C_FG)
+                else:
+                    b.config(bg=C_BG, fg=C_FG_DIM)
+            for w in body.winfo_children():
+                w.destroy()
+            builders[key](body)
+
+        for key, label in tab_defs:
+            btn = tk.Button(tab_bar, text=label,
+                            bg=C_BG, fg=C_FG_DIM,
+                            activebackground=C_BG,
+                            activeforeground=C_FG,
+                            relief="flat", bd=0, font=F_HEAD,
+                            padx=16, pady=8, cursor="hand2",
+                            command=lambda k=key: show(k))
+            btn.pack(side="left")
+            tab_btns[key] = btn
+
+        show(initial_tab)
+
+        try:
+            win.protocol("WM_DELETE_WINDOW", close_manage)
+        except Exception:
+            pass
+
+        center_on_parent(win, self.root)
+        bring_to_front(win)
+
+    def _build_backups_tab(self, parent):
+        frame = tk.Frame(parent, bg=C_BG, padx=16, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(frame, text=self.t("backups_info"), bg=C_BG, fg=C_FG_DIM,
+                 font=F_SMALL, anchor="w", justify="left", wraplength=650
+                 ).pack(fill="x", pady=(0, 12))
+
+        actions = tk.Frame(frame, bg=C_BG)
+        actions.pack(fill="x", pady=(0, 12))
+
+        make_button(actions, self.t("btn_create_backup"),
+                    self._start_backup).pack(side="left")
+        make_button(actions, self.t("btn_open_backup_folder"),
+                    self._open_backup_folder).pack(side="left", padx=(8, 0))
+        make_button(actions, self.t("btn_refresh") if "btn_refresh" in STRINGS.get("en", {}) else "REFRESH",
+                    lambda: self._refresh_backups_tab(parent)).pack(side="left", padx=(8, 0))
+
+        list_frame = tk.Frame(frame, bg=C_BG)
+        list_frame.pack(fill="both", expand=True)
+
+        listbox = tk.Listbox(list_frame, font=F_LOG, bg=C_BG, fg=C_FG,
+                              selectmode=tk.SINGLE, bd=0,
+                              highlightthickness=1,
+                              highlightbackground=C_RED,
+                              selectbackground=C_RED_SEL,
+                              selectforeground=C_FG)
+        listbox.pack(side="left", fill="both", expand=True)
+        sb = make_scrollbar(list_frame, "vertical", listbox.yview)
+        sb.pack(side="right", fill="y")
+        listbox.config(yscrollcommand=sb.set)
+
+        self._backups_listbox = listbox
+        self._backups_entries = self.backups.list_backups()
+        if not self._backups_entries:
+            listbox.insert("end", "  " + self.t("backups_empty"))
+        else:
+            for b in self._backups_entries:
+                line = f"  {b['created']}    {b['addon_count']} addon(s)    {b['size_human']}"
+                listbox.insert("end", line)
+
+        btn_row = tk.Frame(frame, bg=C_BG)
+        btn_row.pack(fill="x", pady=(8, 0))
+        make_button(btn_row, self.t("btn_restore_selected") if "btn_restore_selected" in STRINGS.get("en", {}) else "RESTORE",
+                    lambda: self._restore_selected_backup(listbox)).pack(
+            side="left", expand=True, fill="x", padx=(0, 2))
+        make_button(btn_row, self.t("btn_delete_selected") if "btn_delete_selected" in STRINGS.get("en", {}) else "DELETE",
+                    lambda: self._delete_selected_backup(listbox)).pack(
+            side="left", expand=True, fill="x", padx=(2, 2))
+        make_button(btn_row, self.t("btn_delete_all") if "btn_delete_all" in STRINGS.get("en", {}) else "DELETE ALL",
+                    lambda: self._delete_all_backups(listbox)).pack(
+            side="left", expand=True, fill="x", padx=(2, 0))
+
+    def _refresh_backups_tab(self, parent):
+        for w in parent.winfo_children():
+            w.destroy()
+        self._build_backups_tab(parent)
+
+    def _open_backup_folder(self):
+        d = self.dest_entry.get().strip()
+        if not d:
+            c00l_alert(self.root, self.t("no_dest_title"),
+                       self.t("no_dest_body"), self.t)
+            return
+        backup_root = Path(d) / ".backup"
+        if not backup_root.is_dir():
+            c00l_alert(self.root, self.t("backups_empty"),
+                       self.t("backups_empty"), self.t)
+            return
+        open_folder(backup_root)
+
+    def _start_backup(self):
+        d = self.dest_entry.get().strip()
+        if not d:
+            c00l_alert(self.root, self.t("no_dest_title"),
+                       self.t("no_dest_body"), self.t)
+            return
+        dest = Path(d)
+        if not dest.is_dir():
+            c00l_alert(self.root, self.t("dest_missing_title"),
+                       str(dest), self.t)
+            return
+        if self.busy:
+            return
+        if not c00l_confirm(
+                self.root, self.t("btn_create_backup"),
+                "Copy the entire destination folder into .backup/.\n\n"
+                "This may take a while if the folder is large.",
+                self.t("btn_create_backup"), self.t("cancel_btn"), self.t):
+            return
+        self._set_busy(True)
+        threading.Thread(target=self._run_backup, args=(dest,),
+                          daemon=True).start()
+
+    def _run_backup(self, dest):
+        try:
+            self._log("")
+            self._log(f"=== BACKUP ===")
+            path = self.backups.create(
+                progress_cb=lambda cur, tot, name: self._set_progress(
+                    cur, tot, f"Backing up {cur + 1}/{tot}: {name}"
+                    if cur < tot else f"Backing up {tot}/{tot}"),
+                cancel_flag=self.cancel_flag,
+            )
+            self._log(f"[OK] Backup created: {path}")
+            self.root.after(0, lambda: self._set_status(
+                self.t("backup_done", n=0, path=str(path))))
+        except Exception as e:
+            self._log(f"[ERROR] Backup failed: {e}")
+            logging.error("Backup: %s\n%s", e, traceback.format_exc())
+        finally:
+            self.root.after(0, lambda: self._set_busy(False))
+            self.root.after(500, lambda: self._reset_progress())
+
+    def _restore_selected_backup(self, listbox):
+        sel = listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        entries = getattr(self, "_backups_entries", [])
+        if idx >= len(entries):
+            return
+        entry = entries[idx]
+
+        if not c00l_confirm(
+                self.root, "Restore backup",
+                f"Restore backup from {entry['created']}?\n\n"
+                f"This will copy its {entry['addon_count']} addon(s) back into "
+                f"the destination folder, overwriting existing files.",
+                "Restore", self.t("cancel_btn"), self.t):
+            return
+
+        if self.busy:
+            return
+        self._set_busy(True)
+        threading.Thread(target=self._run_restore, args=(entry,),
+                          daemon=True).start()
+
+    def _run_restore(self, entry):
+        try:
+            self._log("")
+            self._log(f"=== RESTORE {entry['name']} ===")
+            restored = self.backups.restore(
+                entry["path"],
+                progress_cb=lambda cur, tot, name: self._set_progress(
+                    cur, tot, f"Restoring {cur + 1}/{tot}: {name}"
+                    if cur < tot else f"Restoring {tot}/{tot}"),
+                cancel_flag=self.cancel_flag,
+            )
+            self._log(f"[OK] Restored {restored} addon(s).")
+            self.root.after(0, lambda: self._set_status(
+                f"Restored {restored} addon(s)"))
+        except Exception as e:
+            self._log(f"[ERROR] Restore failed: {e}")
+            logging.error("Restore: %s\n%s", e, traceback.format_exc())
+        finally:
+            self.root.after(0, lambda: self._set_busy(False))
+            self.root.after(500, lambda: self._reset_progress())
+
+    def _delete_selected_backup(self, listbox):
+        sel = listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        entries = getattr(self, "_backups_entries", [])
+        if idx >= len(entries):
+            return
+        entry = entries[idx]
+        if not c00l_confirm(
+                self.root, "Delete backup",
+                f"Delete backup from {entry['created']}?",
+                "Delete", self.t("cancel_btn"), self.t):
+            return
+        try:
+            self.backups.delete(entry["path"])
+            self._log(f"[OK] Deleted backup: {entry['name']}")
+        except Exception as e:
+            self._log(f"[!] {e}")
+        # Refresh
+        parent = listbox.master.master
+        self._refresh_backups_tab(parent)
+
+    def _delete_all_backups(self, listbox):
+        entries = getattr(self, "_backups_entries", [])
+        if not entries:
+            return
+        if not c00l_confirm(
+                self.root, "Delete all backups",
+                f"Delete ALL {len(entries)} backup(s)?\n\n"
+                "This cannot be undone.",
+                "Delete all", self.t("cancel_btn"), self.t):
+            return
+        n = self.backups.delete_all()
+        self._log(f"[OK] Deleted {n} backup(s).")
+        parent = listbox.master.master
+        self._refresh_backups_tab(parent)
+
+    def _build_watch_tab(self, parent):
+        frame = tk.Frame(parent, bg=C_BG, padx=16, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        self._watch_status_lbl = tk.Label(
+            frame, text="", bg=C_BG, fg=C_FG, font=F_NORM, anchor="w")
+        self._watch_status_lbl.pack(fill="x", pady=(0, 12))
+
+        actions = tk.Frame(frame, bg=C_BG)
+        actions.pack(fill="x", pady=(0, 12))
+        make_button(actions, self.t("btn_choose_watch"),
+                    self._choose_watch_folder).pack(side="left")
+        self._watch_toggle_btn = make_button(
+            actions, self.t("btn_start_watch"), self._toggle_watch_from_tab)
+        self._watch_toggle_btn.pack(side="left", padx=(8, 0))
+
+        tk.Label(frame, text=self.t("watch_recent"), bg=C_BG, fg=C_FG,
+                 font=F_HEAD, anchor="w").pack(fill="x", pady=(0, 4))
+
+        recent_frame = tk.Frame(frame, bg=C_BG)
+        recent_frame.pack(fill="both", expand=True)
+        self._watch_recent_list = tk.Listbox(
+            recent_frame, font=F_LOG, bg=C_BG, fg=C_FG,
+            selectmode=tk.SINGLE, bd=0,
+            highlightthickness=1, highlightbackground=C_RED)
+        self._watch_recent_list.pack(side="left", fill="both", expand=True)
+        sb = make_scrollbar(recent_frame, "vertical",
+                             self._watch_recent_list.yview)
+        sb.pack(side="right", fill="y")
+        self._watch_recent_list.config(yscrollcommand=sb.set)
+
+        self._refresh_watch_status()
+
+    def _choose_watch_folder(self):
+        folder = filedialog.askdirectory(title=self.t("watch_prompt"),
+                                          initialdir=self._last_dialog_dir)
+        if not folder:
+            return
+        self._pending_watch_folder = folder
+        self._refresh_watch_status()
+
+    def _toggle_watch_from_tab(self):
+        if self._watch_thread and self._watch_thread.is_alive():
+            self._watch_stop.set()
+            self._log(self.t("watch_stopped"))
+            self._refresh_watch_status()
+            return
+        folder = getattr(self, "_pending_watch_folder", "") or \
+                 getattr(self, "_last_watch_folder", "")
+        if not folder:
+            folder = filedialog.askdirectory(title=self.t("watch_prompt"),
+                                              initialdir=self._last_dialog_dir)
+            if not folder:
+                return
+            self._pending_watch_folder = folder
+        self._last_watch_folder = folder
+        self._watch_stop.clear()
+        self._watch_seen.clear()
+        self._log(self.t("watch_started", path=folder))
+        self._watch_thread = threading.Thread(
+            target=self._watch_loop, args=(Path(folder),), daemon=True)
+        self._watch_thread.start()
+        self._refresh_watch_status()
+
+    def _refresh_watch_status(self):
+        try:
+            active = self._watch_thread and self._watch_thread.is_alive()
+        except Exception:
+            active = False
+        folder = getattr(self, "_last_watch_folder", "")
+        if hasattr(self, "_watch_status_lbl"):
+            try:
+                if active and folder:
+                    self._watch_status_lbl.config(
+                        text=self.t("watch_active", path=folder), fg=C_FG)
+                elif folder:
+                    self._watch_status_lbl.config(
+                        text=f"{self.t('watch_idle')}  ({folder})", fg=C_FG_DIM)
+                else:
+                    self._watch_status_lbl.config(
+                        text=self.t("watch_no_folder"), fg=C_FG_DIM)
+            except Exception:
+                pass
+        if hasattr(self, "_watch_toggle_btn"):
+            try:
+                if active:
+                    self._watch_toggle_btn.config(text=self.t("btn_stop_watch"))
+                else:
+                    self._watch_toggle_btn.config(text=self.t("btn_start_watch"))
+            except Exception:
+                pass
+        if hasattr(self, "_watch_recent_list"):
+            try:
+                self._watch_recent_list.delete(0, "end")
+                for p in list(self._watch_seen)[-50:]:
+                    self._watch_recent_list.insert("end", f"  {p}")
+            except Exception:
+                pass
+
+    def _watch_loop(self, folder):
+        while not self._watch_stop.is_set():
+            try:
+                for p in folder.iterdir():
+                    if p.is_file() and p.suffix.lower() in (".gma", ".zip"):
+                        key = str(p)
+                        if key not in self._watch_seen:
+                            self._watch_seen.add(key)
+                            self._log(self.t("watch_new", name=p.name))
+                            self.root.after(0, lambda pp=p: self._register(pp))
+                            self.root.after(0, self._rebuild_list)
+            except Exception:
+                pass
+            time.sleep(WATCH_POLL_SECONDS)
+
+    def _build_collections_tab(self, parent):
+        frame = tk.Frame(parent, bg=C_BG, padx=16, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        actions = tk.Frame(frame, bg=C_BG)
+        actions.pack(fill="x", pady=(0, 12))
+        make_button(actions, self.t("collections_save"),
+                    self._collection_save_current).pack(side="left")
+
+        list_frame = tk.Frame(frame, bg=C_BG)
+        list_frame.pack(fill="both", expand=True)
+        listbox = tk.Listbox(list_frame, font=F_NORM, bg=C_BG, fg=C_FG,
+                              selectmode=tk.SINGLE, bd=0,
+                              highlightthickness=1,
+                              highlightbackground=C_RED,
+                              selectbackground=C_RED_SEL,
+                              selectforeground=C_FG)
+        listbox.pack(side="left", fill="both", expand=True)
+        sb = make_scrollbar(list_frame, "vertical", listbox.yview)
+        sb.pack(side="right", fill="y")
+        listbox.config(yscrollcommand=sb.set)
+        self._collections_listbox = listbox
+
+        def refresh():
+            listbox.delete(0, "end")
+            for name in self.collections.list_collections():
+                listbox.insert("end", name)
+        refresh()
+
+        btn_row = tk.Frame(frame, bg=C_BG)
+        btn_row.pack(fill="x", pady=(8, 0))
+        make_button(btn_row, self.t("collections_load"),
+                    lambda: self._collection_load(listbox)).pack(
+            side="left", expand=True, fill="x", padx=(0, 2))
+        make_button(btn_row, "DEL",
+                    lambda: self._collection_delete(listbox, refresh)).pack(
+            side="left", expand=True, fill="x", padx=(2, 0))
+
+    def _collection_save_current(self):
+        name = simpledialog.askstring(self.t("collections_title"),
+                                       self.t("collections_name"),
+                                       parent=self.root)
+        if not name:
+            return
+        self.collections.save_collection(name, self.sources)
+        self._log(self.t("collections_saved", name=name))
+        if hasattr(self, "_collections_listbox"):
+            self._collections_listbox.insert("end", name)
+
+    def _collection_load(self, listbox):
+        sel = listbox.curselection()
+        if not sel:
+            return
+        name = listbox.get(sel[0])
+        loaded = self.collections.load_collection(name)
+        existing = {(s.kind, str(s.path), s.entry) for s in self.sources}
+        added = 0
+        for s in loaded:
+            key = (s.kind, str(s.path), s.entry)
+            if key in existing:
+                continue
+            self.sources.append(s)
+            if s.kind in ("zip_gma", "zip_folder"):
+                self.name_q.put(s)
+            added += 1
+        self._mark_stale()
+        self._rebuild_list()
+        self._log(f"[OK] Loaded {added} addon(s) from '{name}'")
+
+    def _collection_delete(self, listbox, refresh):
+        sel = listbox.curselection()
+        if not sel:
+            return
+        name = listbox.get(sel[0])
+        if c00l_confirm(self.root, self.t("collections_title"),
+                         f"Delete '{name}'?",
+                         "Delete", self.t("cancel_btn"), self.t):
+            self.collections.delete_collection(name)
+            refresh()
+
+    def _build_maintenance_tab(self, parent):
+        frame = tk.Frame(parent, bg=C_BG, padx=16, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(frame, text=self.t("maintenance_info"), bg=C_BG, fg=C_FG,
+                 font=F_HEAD, anchor="w").pack(fill="x", pady=(0, 8))
+
+        listbox = tk.Listbox(frame, font=F_LOG, bg=C_BG, fg=C_FG,
+                              selectmode=tk.NONE, bd=0,
+                              highlightthickness=1, highlightbackground=C_RED)
+        listbox.pack(fill="both", expand=True, pady=(0, 12))
+
+        files = [
+            ("gmod_manager.json", app_dir() / CONFIG_FILE),
+            ("gmod_session.json", app_dir() / "gmod_session.json"),
+            ("gmod_cache.json", app_dir() / "gmod_cache.json"),
+            ("gmod_collections.json", app_dir() / "gmod_collections.json"),
+            ("gmod_manager.log", app_dir() / LOG_FILE),
+        ]
+        for name, path in files:
+            try:
+                size = human_size(path.stat().st_size) if path.exists() else "-"
+            except Exception:
+                size = "-"
+            listbox.insert("end", f"  {name:<28}  {size:>10}")
+
+        actions = tk.Frame(frame, bg=C_BG)
+        actions.pack(fill="x")
+        make_button(actions, self.t("btn_open_app_folder"),
+                    lambda: open_folder(app_dir())).pack(side="left")
+        make_button(actions, self.t("btn_clear_cache"),
+                    self._clear_cache_file).pack(side="left", padx=(8, 0))
+        make_button(actions, self.t("btn_clear_session"),
+                    self._clear_session_file).pack(side="left", padx=(8, 0))
+        make_button(actions, self.t("btn_reset_config"),
+                    self._reset_config_file).pack(side="left", padx=(8, 0))
+
+    def _clear_cache_file(self):
+        if not c00l_confirm(self.root, self.t("btn_clear_cache"),
+                             self.t("confirm_clear_cache"),
+                             "Delete", self.t("cancel_btn"), self.t):
+            return
+        p = app_dir() / "gmod_cache.json"
+        try:
+            if p.exists():
+                p.unlink()
+            self.cache = CacheManager()
+            self._log("[OK] Cache cleared.")
+        except Exception as e:
+            self._log(f"[!] {e}")
+
+    def _clear_session_file(self):
+        if not c00l_confirm(self.root, self.t("btn_clear_session"),
+                             self.t("confirm_clear_session"),
+                             "Delete", self.t("cancel_btn"), self.t):
+            return
+        p = app_dir() / "gmod_session.json"
+        try:
+            if p.exists():
+                p.unlink()
+            self._log("[OK] Session cleared.")
+        except Exception as e:
+            self._log(f"[!] {e}")
+
+    def _reset_config_file(self):
+        if not c00l_confirm(self.root, self.t("btn_reset_config"),
+                             self.t("confirm_reset_config"),
+                             "Reset", self.t("cancel_btn"), self.t):
+            return
+        p = app_dir() / CONFIG_FILE
+        try:
+            if p.exists():
+                p.unlink()
+            self._log("[OK] Config reset.")
+        except Exception as e:
+            self._log(f"[!] {e}")
 
     def _show_about(self):
         c00l_choice(
@@ -2989,8 +3447,6 @@ tr:hover {{ background:#1a0000; }}
             self.root, self.t("menu_shortcuts"),
             self.t("shortcuts_body"),
             [(self.t("close_btn"), "ok", "primary")], self.t)
-
-    # ------------------- Close -------------------
 
     def on_close(self):
         if self.busy:

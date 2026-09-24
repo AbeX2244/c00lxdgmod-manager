@@ -23,7 +23,7 @@ F_ROW    = ("Arial", 10, "bold")
 F_ROW_S  = ("Arial", 9)
 
 APP_NAME = "GMod Addon Manager"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.3.0"
 
 CONFIG_FILE      = "gmod_manager.json"
 CACHE_FILE       = "gmod_cache.json"
@@ -31,10 +31,18 @@ SESSION_FILE     = "gmod_session.json"
 LOG_FILE         = "gmod_manager.log"
 COLLECTIONS_FILE = "gmod_collections.json"
 
+SCHEMA_CONFIG      = 2
+SCHEMA_CACHE       = 2
+SCHEMA_SESSION     = 1
+SCHEMA_COLLECTIONS = 1
+
 TEXT_EXTENSIONS = {".txt", ".json", ".lua", ".md", ".cfg", ".ini", ".xml"}
 
 RAW_MARKERS = ("lua/", "materials/", "models/", "sound/",
                "scripts/", "particles/", "scenes/", "resource/")
+
+RAW_FOLDER_MARKERS = {"lua", "materials", "models", "sound",
+                       "scripts", "particles", "scenes", "resource"}
 
 KNOWN_DEPENDENCIES = {
     r"\bdrgbase\b": "DrGBase",
@@ -65,6 +73,8 @@ KNOWN_DEPENDENCIES = {
     r"\bm9k\b": "M9K",
     r"\bcw[_]?2\.0\b": "CW 2.0",
     r"\bsbx\b": "SBX",
+    r"\bvmanip\b": "VManip",
+    r"\bvmanip[_ ]?base\b": "VManip (Base)",
 }
 
 LUA_DEP_HINTS = {
@@ -144,11 +154,17 @@ NESTED_WORKERS = 3
 WATCH_POLL_SECONDS = 3
 CACHE_MAX_ENTRIES = 2000
 MAX_SUMMARY_LINES = 4000
+FOLDER_SCAN_WARN_THRESHOLD = 100
 
 WINDOWS_RESERVED = {
     "CON", "PRN", "AUX", "NUL",
     "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
     "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
+
+PLACEHOLDER_AUTHORS = {
+    "author name", "author", "unknown", "anonymous",
+    "n/a", "none", "your name", ""
 }
 
 DEFAULT_LANG = "en"
@@ -305,6 +321,27 @@ STRINGS = {
         "search_found": "{n} match(es)",
         "search_none": "No matches",
         "eta_prefix": "ETA {eta}",
+        "schema_warning_title": "Config from newer version",
+        "schema_warning_body": "Your config files were created by a newer version of GMod Addon Manager.\n\n"
+                               "This build will not overwrite them. Preferences like language, "
+                               "recent paths, and geometry are reset for this session only.",
+        "readonly_title": "Cannot write to this folder",
+        "readonly_body": "GMod Addon Manager needs to write its configuration and log files next to the executable, but the current location is read-only.\n\n"
+                         "Move the .exe to a folder you own (Documents, Desktop, Downloads, or any user folder) and run it again.",
+        "temp_title": "Running from a temporary location",
+        "temp_body": "The .exe appears to be running from inside a .zip or a temporary folder.\n\n"
+                     "Windows will delete these files when you close the app, so your session and settings would be lost.\n\n"
+                     "Extract the .exe to a permanent folder first.",
+        "log_missing_title": "Log file unavailable",
+        "log_missing_body": "Could not create gmod_manager.log in this folder.\n\n"
+                            "Debug information will not be saved during this session.",
+        "folder_scan_title": "Large folder",
+        "folder_scan_body": "{name} contains {n} addon files.\n\nAdding all of them may take a few seconds.\n\nContinue?",
+        "folder_scan_yes": "Add all",
+        "html_summary_section": "Analysis Summary",
+        "html_addons_section": "Addons",
+        "html_no_analysis": "(no analysis data \u2014 run ANALYZE first)",
+        "html_stale_analysis": "(analysis is stale \u2014 run ANALYZE again for fresh data)",
         "status_analyzing": "Analyzing {i}/{total}: {name}",
         "status_scanning": "Scanning {i}/{total}: {name}",
         "status_extracting": "Extracting {i}/{total}: {name}",
@@ -330,10 +367,11 @@ STRINGS = {
         "status_no_op": "No operation in progress.",
         "status_cancel_requested": "Cancel requested...",
         "status_counts": "{total} addon(s) - {marked} marked - {size}",
+        "status_folder_scanned": "{name}: {n} addon file(s) found",
         "help_hint": "Hover any button to see what it does. Right-click a row for actions.",
         "help_add_manual": "Add the path typed in the field above",
         "help_browse": "Pick one or more .gma or .zip files",
-        "help_browse_folder": "Add a raw addon folder (with lua/, materials/, ...)",
+        "help_browse_folder": "Add a folder. Scans for .gma/.zip inside, or treats it as a raw addon.",
         "help_history": "Show the last 10 paths you used",
         "help_all": "Mark all addons",
         "help_none": "Unmark all addons",
@@ -363,6 +401,34 @@ STRINGS = {
         "row_menu_temp": "Extract to temp and open",
         "row_menu_copy": "Copy path",
         "row_menu_copy_name": "Copy name",
+                "manage_btn": "MANAGE",
+        "help_manage": "Backups, watch folder, collections, and maintenance",
+        "tab_backups": "BACKUPS",
+        "tab_watch": "WATCH",
+        "tab_collections": "COLLECTIONS",
+        "tab_maintenance": "MAINTENANCE",
+        "btn_create_backup": "Create backup",
+        "btn_open_backup_folder": "Open backup folder",
+        "btn_choose_watch": "Choose folder",
+        "btn_start_watch": "Start",
+        "btn_stop_watch": "Stop",
+        "watch_idle": "Not watching.",
+        "watch_active": "Watching: {path}",
+        "watch_no_folder": "No folder chosen yet.",
+        "watch_recent": "Files detected this session:",
+        "backups_empty": "No backups yet.",
+        "backups_info": "Backups are stored in .backup/ inside the destination folder.",
+        "maintenance_info": "Files used by GMod Addon Manager:",
+        "btn_open_app_folder": "Open app folder",
+        "btn_clear_cache": "Clear analysis cache",
+        "btn_clear_session": "Clear session",
+        "btn_reset_config": "Reset all config",
+        "stale_title": "Stale analysis",
+        "stale_body": "The addon list changed since the last analysis.\nRun ANALYZE again to refresh the data.",
+        "confirm_clear_cache": "Delete the analysis cache?",
+        "confirm_clear_session": "Delete the current session file?\nThe addon list will be empty next time the app starts.",
+        "confirm_reset_config": "Reset ALL config?\nThis removes preferences, recent paths, and geometry. The addon list and backups are NOT affected.",
+        "confirm_delete_backup": "Delete this backup?",
     },
     "es": {
         "lang_button": "EN",
@@ -515,6 +581,27 @@ STRINGS = {
         "search_found": "{n} coincidencia(s)",
         "search_none": "Sin coincidencias",
         "eta_prefix": "Restante {eta}",
+        "schema_warning_title": "Config de version mas nueva",
+        "schema_warning_body": "Tus archivos de configuracion fueron creados por una version mas nueva de GMod Addon Manager.\n\n"
+                               "Esta build no los va a sobrescribir. Las preferencias como idioma, "
+                               "rutas recientes y geometria se resetean solo para esta sesion.",
+        "readonly_title": "No se puede escribir en esta carpeta",
+        "readonly_body": "GMod Addon Manager necesita escribir su configuracion y log junto al ejecutable, pero la ubicacion actual es de solo lectura.\n\n"
+                         "Mueve el .exe a una carpeta tuya (Documentos, Escritorio, Descargas, o cualquier carpeta de usuario) y ejecutalo de nuevo.",
+        "temp_title": "Ejecutando desde una ubicacion temporal",
+        "temp_body": "El .exe parece estar corriendo desde dentro de un .zip o una carpeta temporal.\n\n"
+                     "Windows borrara estos archivos al cerrar la app, asi que tu sesion y configuracion se perderian.\n\n"
+                     "Extrae el .exe a una carpeta permanente primero.",
+        "log_missing_title": "Log no disponible",
+        "log_missing_body": "No se pudo crear gmod_manager.log en esta carpeta.\n\n"
+                            "La informacion de debug no se guardara durante esta sesion.",
+        "folder_scan_title": "Carpeta grande",
+        "folder_scan_body": "{name} contiene {n} archivos de addon.\n\nAgregarlos todos puede tardar unos segundos.\n\nContinuar?",
+        "folder_scan_yes": "Agregar todo",
+        "html_summary_section": "Resumen del analisis",
+        "html_addons_section": "Addons",
+        "html_no_analysis": "(sin datos de analisis \u2014 ejecuta ANALYZE primero)",
+        "html_stale_analysis": "(analisis desactualizado \u2014 ejecuta ANALYZE de nuevo)",
         "status_analyzing": "Analizando {i}/{total}: {name}",
         "status_scanning": "Escaneando {i}/{total}: {name}",
         "status_extracting": "Extrayendo {i}/{total}: {name}",
@@ -540,10 +627,11 @@ STRINGS = {
         "status_no_op": "No hay operacion en curso.",
         "status_cancel_requested": "Cancelacion solicitada...",
         "status_counts": "{total} addon(s) - {marked} marcados - {size}",
+        "status_folder_scanned": "{name}: {n} archivo(s) de addon encontrados",
         "help_hint": "Pasa el cursor por un boton para ver que hace. Clic derecho en una fila para acciones.",
         "help_add_manual": "Anade la ruta escrita en el campo",
         "help_browse": "Elige uno o varios .gma o .zip",
-        "help_browse_folder": "Anade una carpeta cruda (con lua/, materials/, ...)",
+        "help_browse_folder": "Anade una carpeta. Escanea .gma/.zip adentro, o la trata como addon crudo.",
         "help_history": "Muestra las ultimas 10 rutas usadas",
         "help_all": "Marca todos los addons",
         "help_none": "Desmarca todos",
@@ -573,5 +661,33 @@ STRINGS = {
         "row_menu_temp": "Extraer a temporal y abrir",
         "row_menu_copy": "Copiar ruta",
         "row_menu_copy_name": "Copiar nombre",
+                "manage_btn": "GESTIONAR",
+        "help_manage": "Backups, vigilancia, colecciones y mantenimiento",
+        "tab_backups": "BACKUPS",
+        "tab_watch": "VIGILAR",
+        "tab_collections": "COLECCIONES",
+        "tab_maintenance": "MANTENIMIENTO",
+        "btn_create_backup": "Crear backup",
+        "btn_open_backup_folder": "Abrir carpeta de backups",
+        "btn_choose_watch": "Elegir carpeta",
+        "btn_start_watch": "Iniciar",
+        "btn_stop_watch": "Detener",
+        "watch_idle": "No vigilando.",
+        "watch_active": "Vigilando: {path}",
+        "watch_no_folder": "Sin carpeta elegida.",
+        "watch_recent": "Archivos detectados en esta sesion:",
+        "backups_empty": "Sin backups.",
+        "backups_info": "Los backups van en .backup/ dentro de la carpeta destino.",
+        "maintenance_info": "Archivos usados por GMod Addon Manager:",
+        "btn_open_app_folder": "Abrir carpeta de la app",
+        "btn_clear_cache": "Borrar cache de analisis",
+        "btn_clear_session": "Borrar sesion",
+        "btn_reset_config": "Resetear toda la config",
+        "stale_title": "Analisis desactualizado",
+        "stale_body": "La lista cambio desde el ultimo analisis.\nEjecuta ANALYZE de nuevo para refrescar los datos.",
+        "confirm_clear_cache": "Borrar la cache de analisis?",
+        "confirm_clear_session": "Borrar la sesion actual?\nLa lista va a estar vacia la proxima vez que abras la app.",
+        "confirm_reset_config": "Resetear TODA la config?\nEsto elimina preferencias, rutas recientes y geometria. La lista y los backups NO se tocan.",
+        "confirm_delete_backup": "Borrar este backup?",
     },
 }

@@ -10,13 +10,26 @@ import tempfile
 from pathlib import Path
 import tkinter as tk
 
-from config import APP_NAME, APP_VERSION
+from config import APP_NAME, APP_VERSION, STRINGS
 from core import (
-    configure_logging, safe_name, copy_tree,
+    configure_logging, check_i18n_consistency,
+    safe_name, copy_tree,
+    is_app_dir_writable, is_running_from_temp,
     GMAExtractor, Analyzer, ZipIndex, Source,
     read_gma_metadata_file,
 )
-from ui import GModAddonManager
+from ui import GModAddonManager, c00l_alert
+
+
+def _t_en(key, **fmt):
+    d = STRINGS.get("en", {})
+    s = d.get(key, key)
+    if fmt:
+        try:
+            s = s.format(**fmt)
+        except Exception:
+            pass
+    return s
 
 
 def run_cli(args) -> int:
@@ -151,7 +164,21 @@ def main():
         sys.exit(run_cli(args))
 
     configure_logging()
+    check_i18n_consistency()
     root = tk.Tk()
+    root.withdraw()
+
+    if is_running_from_temp():
+        c00l_alert(root, _t_en("temp_title"), _t_en("temp_body"), _t_en)
+        root.destroy()
+        sys.exit(1)
+
+    if not is_app_dir_writable():
+        c00l_alert(root, _t_en("readonly_title"), _t_en("readonly_body"), _t_en)
+        root.destroy()
+        sys.exit(1)
+
+    root.deiconify()
     app = GModAddonManager(root)
     app.run()
 
